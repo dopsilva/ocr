@@ -1,11 +1,11 @@
 # Sea OCR
 
-Biblioteca de **OCR (Optical Character Recognition)** escrita em **[Sea](https://github.com/dopsilva/sea)**, utilizando `libs/tensor` para aceleração de rede neural (MLP) e `libs/compress` para leitura e escrita nativa de imagens PNG.
+Biblioteca de **OCR (Optical Character Recognition)** escrita em **[Sea](https://github.com/dopsilva/sea)**, utilizando `libs/tensor` para aceleração de rede neural (MLP) e `libs/image` (com `libs/compress` para PNG) para leitura e escrita de imagens.
 
 ## Recursos
 
 - **100% em [Sea](https://github.com/dopsilva/sea)**: sem dependência de motores externos de OCR (como Tesseract).
-- **Formatos de imagem suportados**:
+- **Formatos de imagem suportados** (via [`libs/image`](../sea_vm/libs/image/image.sea), compartilhada com o Sea QRCode):
   - **PNG** (8-bit Grayscale, RGB, RGBA, Palette + filtros Paeth, Sub, Up, Average)
   - **BMP** (1, 8, 24 e 32 bits)
   - **PGM / PPM / PBM** (`P1` a `P6`)
@@ -31,7 +31,7 @@ Biblioteca de **OCR (Optical Character Recognition)** escrita em **[Sea](https:/
 | Arquivo | Descrição |
 |---------|-----------|
 | [`ocr.sea`](ocr.sea) | Ponto de entrada principal (`ocr.read`, `ocr.recognize`, `ocr.new_engine`) |
-| [`image.sea`](image.sea) | Decodificação, codificação e manipulação de imagens PNG, BMP, PNM e ASCII |
+| [`libs/image`](../sea_vm/libs/image/image.sea) | (no sea_vm) Decodificação, codificação e manipulação de imagens PNG, BMP, PNM e ASCII; `ocr.image` a expõe |
 | [`preprocess.sea`](preprocess.sea) | Filtros de pré-processamento, binarização Otsu/adaptativa, morfologia e deskew |
 | [`segment.sea`](segment.sea) | Segmentação de linhas, palavras e caracteres com bounding boxes |
 | [`features.sea`](features.sea) | Extração de vetor de características de 224 dimensões (`float_array`) |

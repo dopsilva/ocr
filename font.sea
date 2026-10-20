@@ -1,6 +1,6 @@
 -- font.sea — Built-in 5x7 / 8x12 bitmap font, custom font registry, and text-to-image renderer.
 
-local image = require("./image")
+local image = require("../sea_vm/libs/image/image")
 
 local M = {}
 

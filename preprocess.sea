@@ -2,7 +2,7 @@
 -- grayscale, contrast stretch, Otsu & adaptive thresholding, denoise (median & speckle),
 -- morphological operations (dilate, erode, open, close), crop, trim, resize, and deskew.
 
-local image = require("./image")
+local image = require("../sea_vm/libs/image/image")
 
 local M = {}
 
