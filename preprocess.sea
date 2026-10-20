@@ -457,6 +457,37 @@ function M.resize(img, new_w, new_h, opts)
     return out
 end
 
+-- preprocess.upscale(img, k) → Image k times as wide and tall (bilinear),
+-- for text too small to segment and classify well
+function M.upscale(img, k)
+    local sw = img.width
+    local sh = img.height
+    local w = sw * k
+    local h = sh * k
+    local out = image.new(w, h, 255)
+    local src = img.data
+    local dst = out.data
+    for y = 0, h - 1 do
+        local v = math.max(0.0, (y + 0.5) / k - 0.5)
+        local y0 = math.min(sh - 1, math.floor(v))
+        local y1 = math.min(sh - 1, y0 + 1)
+        local fy = v - y0
+        local r0 = y0 * sw
+        local r1 = y1 * sw
+        local row = y * w
+        for x = 0, w - 1 do
+            local u = math.max(0.0, (x + 0.5) / k - 0.5)
+            local x0 = math.min(sw - 1, math.floor(u))
+            local x1 = math.min(sw - 1, x0 + 1)
+            local fx = u - x0
+            local top = src[r0 + x0] + (src[r0 + x1] - src[r0 + x0]) * fx
+            local bot = src[r1 + x0] + (src[r1 + x1] - src[r1 + x0]) * fx
+            dst[row + x] = math.floor(top + (bot - top) * fy + 0.5)
+        end
+    end
+    return out
+end
+
 -- preprocess.rotate(img, angle_deg) → Image
 function M.rotate(img, angle_deg)
     if math.abs(angle_deg) < 1e-4 then

@@ -64,6 +64,62 @@ local function classify_char(mdl, img, ch_info, opts)
     return mdl:classify(ch_info, copts)
 end
 
+local STROKE = {I = true, l = true, ["1"] = true, ["|"] = true, i = true, j = true, J = true, ["!"] = true, ["'"] = true, ["í"] = true, ["ì"] = true, ["î"] = true, ["ï"] = true, ["Í"] = true, ["Ì"] = true, ["Î"] = true, ["Ï"] = true, ["("] = true, [")"] = true, ["/"] = true}
+local DIGIT = {["0"] = true, ["1"] = true, ["2"] = true, ["3"] = true, ["4"] = true, ["5"] = true, ["6"] = true, ["7"] = true, ["8"] = true, ["9"] = true}
+
+-- a wide character read with little confidence may be two touching ones
+-- ("20" read as "a"): cut it at the columns with the least ink and keep the
+-- cut whose halves both read clearly better. → [ {pred, info} ]
+local function read_char(mdl, img, ch_info, opts, depth)
+    local pred = classify_char(mdl, img, ch_info, opts)?
+    local whole = [{pred = pred, info = ch_info}]
+    local b = ch_info.bbox
+    local min_aspect = depth == 0 and 0.8 or 1.2
+    if opts.split_touching == false or depth >= 2 or b.w < b.h * min_aspect or b.w < 6 or pred.confidence >= 0.95
+        or b.h < ch_info.line_height * 0.4 then
+        return whole
+    end
+    local thr = opts.threshold or 128
+    local cols = []
+    for dx = math.max(2, b.w * 3 // 10), math.min(b.w - 3, b.w * 7 // 10) do
+        local ink = 0
+        for y = b.y, b.y + b.h - 1 do
+            if img.data[y * img.width + b.x + dx] < thr then ink += 1 end
+        end
+        -- the inside of an o has as little ink as a join: prefer the middle
+        cols[] = [dx, (ink + 1) * (1.0 + 3.0 * math.abs(dx / (b.w * 1.0) - 0.5))]
+    end
+    sort.sort(cols, function(p, q) return p[1] < q[1] end)
+    local cuts = [b.w // 2]
+    for i = 0, len(cols) - 1 do
+        if len(cuts) >= 4 then break end
+        if not list.contains(cuts, cols[i][0]) then cuts[] = cols[i][0] end
+    end
+    local best = nil
+    local best_score = pred.confidence + 0.04
+    for _, dx in cuts do
+        local left = segment.char_info(img, {x = b.x, y = b.y, w = dx, h = b.h}, ch_info.line_top, ch_info.line_height, thr)
+        local right = segment.char_info(img, {x = b.x + dx, y = b.y, w = b.w - dx, h = b.h}, ch_info.line_top, ch_info.line_height, thr)
+        local lp = classify_char(mdl, img, left, opts)?
+        local rp = classify_char(mdl, img, right, opts)?
+        local score = math.min(lp.confidence, rp.confidence)
+        -- a lone stroke is what any cut of m, n, u or w leaves: no half may
+        -- be one, but for a 1 beside a digit ("10")
+        local ok = not (STROKE[lp.char] and not (lp.char == "1" and DIGIT[rp.char]))
+            and not (STROKE[rp.char] and not (rp.char == "1" and DIGIT[lp.char]))
+        if ok and score > best_score then
+            best_score = score
+            best = [left, right]
+        end
+    end
+    if best == nil then return whole end
+    local out = []
+    for _, half in best do
+        for _, r in read_char(mdl, img, half, opts, depth + 1)? do out[] = r end
+    end
+    return out
+end
+
 local function resolve_image(source)
     if type(source) == "string" then
         return image.load(source)
@@ -73,10 +129,35 @@ local function resolve_image(source)
     return error("ocr: expected file path (string) or Image object")
 end
 
+-- the glyphs are learned about 26 pixels a line: text much smaller than
+-- that is enlarged first (the factor, 1 when the text is large enough)
+const TARGET_LINE = 26
+local function upscale_factor(img, opts)
+    local probe = preprocess.run(img, opts.preprocess_opts or opts)
+    local hs = []
+    for _, l in segment.lines(probe, opts.segment_opts or opts) do
+        if l.bbox.h >= 4 then hs[] = l.bbox.h end
+    end
+    if len(hs) == 0 then return 1 end
+    local h = sort.sorted(hs)[len(hs) // 2]
+    if h >= 20 then return 1 end
+    return math.min(4, math.ceil(TARGET_LINE / (h * 1.0)))
+end
+
+local function unscale_box(b, k)
+    local x0 = b.x // k
+    local y0 = b.y // k
+    return {x = x0, y = y0, w = math.max(1, (b.x + b.w + k - 1) // k - x0), h = math.max(1, (b.y + b.h + k - 1) // k - y0)}
+end
+
 -- ocr.recognize(source [, opts]) → { text, confidence, lines, words, chars, preprocessed }|error
+-- opts.upscale: the factor small text is enlarged by (default: chosen from
+-- the line height; 1 never enlarges)
 function M.recognize(source, opts)
     opts = opts or {}
     local raw_img = resolve_image(source)?
+    local k = opts.upscale or (opts.preprocess ~= false and upscale_factor(raw_img, opts) or 1)
+    if k > 1 then raw_img = preprocess.upscale(raw_img, k) end
     local proc_img = raw_img
     if opts.preprocess ~= false then
         proc_img = preprocess.run(raw_img, opts.preprocess_opts or opts)
@@ -106,8 +187,13 @@ function M.recognize(source, opts)
             local char_strs = []
             local word_conf_sum = 0.0
 
+            local pieces = []
             for _, ch_info in word.chars do
-                local pred = classify_char(mdl, proc_img, ch_info, opts)?
+                for _, r in read_char(mdl, proc_img, ch_info, opts, 0)? do pieces[] = r end
+            end
+            for _, piece in pieces do
+                local pred = piece.pred
+                local ch_info = piece.info
                 local ch_entry = {
                     char = pred.char,
                     confidence = pred.confidence,
@@ -153,6 +239,13 @@ function M.recognize(source, opts)
             chars = line_chars,
         }
         line_texts[] = l_text
+    end
+
+    -- the boxes in the coordinates of the image given
+    if k > 1 then
+        for _, l in out_lines do l.bbox = unscale_box(l.bbox, k) end
+        for _, w in all_words do w.bbox = unscale_box(w.bbox, k) end
+        for _, c in all_chars do c.bbox = unscale_box(c.bbox, k) end
     end
 
     local full_text = string.join(line_texts, "\n")

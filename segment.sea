@@ -310,6 +310,25 @@ local function tighten_box(img, box, thr)
     }
 end
 
+-- segment.char_info(img, box, line_top, line_h [, thr]) → a character
+-- descriptor for the ink inside box (bbox tightened, patch, heights relative
+-- to the line)
+function M.char_info(img, box, line_top, line_h, thr)
+    local tight = tighten_box(img, box, thr or 128)
+    line_h = math.max(1, line_h)
+    return {
+        bbox = {x = tight.x, y = tight.y, w = tight.w, h = tight.h},
+        rel_top = (tight.y - line_top) / (line_h * 1.0),
+        rel_bottom = (tight.y + tight.h - line_top) / (line_h * 1.0),
+        rel_height = tight.h / (line_h * 1.0),
+        aspect = tight.w / (math.max(1, tight.h) * 1.0),
+        line_height = line_h,
+        line_top = line_top,
+        patch = preprocess.crop(img, tight.x, tight.y, tight.w, tight.h),
+        parts = box.parts,
+    }
+end
+
 -- segment.line_chars(img, line_bbox [, opts]) → array of character descriptors
 function M.line_chars(img, line_bbox, opts)
     opts = opts or {}
@@ -330,28 +349,8 @@ function M.line_chars(img, line_bbox, opts)
     end
     sort.by(merged, "x")
 
-    local line_h = math.max(1, line_bbox.h)
     local chars = []
-    for _, box in merged do
-        local tight = tighten_box(img, box, thr)
-        local patch = preprocess.crop(img, tight.x, tight.y, tight.w, tight.h)
-        local rel_top = (tight.y - line_bbox.y) / (line_h * 1.0)
-        local rel_bottom = (tight.y + tight.h - line_bbox.y) / (line_h * 1.0)
-        local rel_height = tight.h / (line_h * 1.0)
-        local aspect = tight.w / (math.max(1, tight.h) * 1.0)
-        chars[] = {
-            bbox = {x = tight.x, y = tight.y, w = tight.w, h = tight.h},
-            rel_top = rel_top,
-            rel_bottom = rel_bottom,
-            rel_height = rel_height,
-            aspect = aspect,
-            line_height = line_h,
-            line_top = line_bbox.y,
-            patch = patch,
-            parts = box.parts,
-        }
-    end
-
+    for _, box in merged do chars[] = M.char_info(img, box, line_bbox.y, line_bbox.h, thr) end
     return chars
 end
 
@@ -369,13 +368,7 @@ function M.group_words(chars, line_bbox, opts)
         ]
     end
 
-    -- Calculate character widths and inter-character edge-to-edge gaps
-    local widths = []
-    for _, c in chars do widths[] = c.bbox.w end
-    local med_w = list.median(widths)
-    local line_h = math.max(1, line_bbox.h)
-    local ref_char_w = math.max(med_w, line_h * 0.55)
-
+    -- the edge-to-edge gaps between characters
     local gaps = []
     for i = 1, len(chars) - 1 do
         local prev = chars[i - 1].bbox
@@ -403,26 +396,36 @@ function M.group_words(chars, line_bbox, opts)
     local med_h = list.median(heights)
     local space_thr = math.max(min_pos_gap * 2.1, med_gap * 2.5, med_h * 0.33)
 
-    -- If there is a clear bimodal jump in sorted_gaps (e.g. intra-word gaps vs inter-word spaces),
-    -- place the threshold at the midpoint of the largest jump.
     local max_gap = sorted_gaps[-1]
-    if max_gap >= min_pos_gap * 1.8 and max_gap >= ref_char_w * 0.5 then
-        local best_jump = 0
-        local jump_thr = space_thr
-        for i = 1, len(sorted_gaps) - 1 do
-            local g0 = sorted_gaps[i - 1]
-            local g1 = sorted_gaps[i]
-            local jump = g1 - g0
-            if g0 <= ref_char_w * 0.9 and g1 >= ref_char_w * 0.55 and jump > best_jump then
-                best_jump = jump
-                jump_thr = (g0 + g1) / 2.0
+    do
+        -- two classes of gaps (between letters, between words): the cut with
+        -- the largest variance between them, if the classes are far apart
+        local n = len(sorted_gaps)
+        local total = 0.0
+        for _, g in sorted_gaps do total += g end
+        local best = -1.0
+        local cut = nil
+        local lo_sum = 0.0
+        for i = 0, n - 2 do
+            lo_sum += sorted_gaps[i]
+            if sorted_gaps[i + 1] > sorted_gaps[i] then
+                local n0 = i + 1
+                local n1 = n - n0
+                local m0 = lo_sum / n0
+                local m1 = (total - lo_sum) / n1
+                local v = n0 * n1 * (m1 - m0) * (m1 - m0)
+                if v > best then
+                    best = v
+                    cut = [m0, m1, sorted_gaps[i], sorted_gaps[i + 1]]
+                end
             end
         end
-        if best_jump >= math.max(2, min_pos_gap * 0.75) then
-            space_thr = jump_thr
+        if cut ~= nil and cut[3] >= med_h * 0.25 and cut[1] >= math.max(cut[0], 1) * 2.0 then
+            space_thr = (cut[2] + cut[3]) / 2.0
+        elseif cut ~= nil then
+            space_thr = math.max(space_thr, max_gap + 1)
         end
     end
-
     if opts.space_threshold then
         space_thr = opts.space_threshold
     end

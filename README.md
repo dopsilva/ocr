@@ -19,14 +19,15 @@ Biblioteca de **OCR (Optical Character Recognition)** escrita em **[Sea](https:/
 - **Segmentação hierárquica (Linhas → Palavras → Caracteres)**:
   - Rotulagem de componentes conexos (8-conectividade)
   - Fusão automática de pontos e diacríticos (`i`, `j`, `!`, `?`, `:`, `=`)
-  - Divisão de caracteres colados por vale de projeção vertical
-  - Agrupamento adaptativo de palavras e cálculo de bounding boxes (`{x, y, w, h}`) em todos os níveis
+  - Divisão de caracteres colados por vale de projeção vertical e, guiada pelo classificador, de caracteres largos lidos com pouca confiança (`20` lido como `a`): a peça é cortada em colunas de pouca tinta perto do meio e o corte vale se as duas metades forem lidas com confiança claramente maior (opção `split_touching = false` desliga)
+  - Texto pequeno (linhas com menos de 20 px) é ampliado em escala de cinza (bilinear, `preprocess.upscale`) antes da binarização; as caixas voltam às coordenadas da imagem original (opção `upscale`: o fator, ou `1` para nunca ampliar)
+  - Agrupamento de palavras pelo limiar de Otsu sobre as distâncias entre caracteres (duas classes: entre letras e entre palavras) e cálculo de bounding boxes (`{x, y, w, h}`) em todos os níveis
 - **Português**: letras acentuadas (`á à â ã é ê í ó ô õ ú ç` e maiúsculas, `º ª`) — uma marca acima da letra é lida à parte (ponto, agudo, grave, circunflexo, til, trema) e composta com a letra (`accents.sea`); acentos encostados na letra são reconhecidos pelo protótipo da letra acentuada
 - **Correção por contexto** (`context.sea`), por linha: maiúscula/minúscula de letras de mesmo desenho (`c o s u v w x z`) pela altura comparada à altura-x e à das maiúsculas da linha; em trechos numéricos as letras parecidas viram dígitos (`O→0`, `l/I→1`, `S→5`…) e o inverso em palavras; `I`/`l` pela caixa da palavra; `.`, `-` e `_` pela geometria
 - **Classificador Híbrido (Template Estrutural + Rede Neural MLP com `libs/tensor`)**:
   - Extrator de características de **224 dimensões** (`float_array`): grid normalizado 10×14, projeções horizontais/verticais, perfis de contorno externo, cruzamentos de traço e topologia (furos/Euler + razão de aspecto + posição relativa na linha)
-  - Fonte bitmap 5×7 e glifos TrueType embutidos: `DejaVuSansMono` Regular e Bold, e em [`glyphs.sea`](glyphs.sea) (gerado por [`tools/gen_glyphs.sea`](tools/gen_glyphs.sea)) DejaVu Sans/Serif/Mono, Liberation Sans/Serif/Mono, Noto Sans/Serif e Ubuntu — 133 classes: `A-Z`, `a-z`, `0-9`, pontuação, `$ % & * # @ ; ' " _` e as letras acentuadas
-  - Acerto por caractere em texto renderizado (11 fontes, 4 tamanhos): ~94% em 24–36 px, ~84% na média de 12 a 36 px, ~80% em fontes que não estão no treino
+  - Fonte bitmap 5×7 e glifos TrueType embutidos: `DejaVuSansMono` Regular e Bold, e em [`glyphs.sea`](glyphs.sea) (gerado por [`tools/gen_glyphs.sea`](tools/gen_glyphs.sea) com o rasterizador TrueType em Sea puro [`libs/truetype`](../sea_vm/libs/truetype/truetype.sea), sem Python) DejaVu Sans/Serif/Mono, Liberation Sans/Serif/Mono, Noto Sans/Serif e Ubuntu — 133 classes: `A-Z`, `a-z`, `0-9`, pontuação, `$ % & * # @ ; ' " _` e as letras acentuadas
+  - Acerto por caractere em texto renderizado (11 fontes, 4 tamanhos, texto em inglês e em português): ~95% em 24–36 px, ~80% em 12 px, ~89% na média, ~85% em fontes que não estão no treino
   - Treinamento neural com `libs/tensor` (`matvec`, `rmsnorm`, `relu`, `softmax`, `adam`) e persistência de modelos em JSON (`save`/`load`)
 
 ## Estrutura dos Módulos
