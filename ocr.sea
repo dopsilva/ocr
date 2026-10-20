@@ -67,65 +67,159 @@ end
 local STROKE = {I = true, l = true, ["1"] = true, ["|"] = true, i = true, j = true, J = true, ["!"] = true, ["'"] = true, ["í"] = true, ["ì"] = true, ["î"] = true, ["ï"] = true, ["Í"] = true, ["Ì"] = true, ["Î"] = true, ["Ï"] = true, ["("] = true, [")"] = true, ["/"] = true}
 local X_HEIGHT = {m = true, n = true, u = true, w = true, r = true, v = true}
 local STEM = {I = true, l = true, ["1"] = true, ["|"] = true}
-local DIGIT = {["0"] = true, ["1"] = true, ["2"] = true, ["3"] = true, ["4"] = true, ["5"] = true, ["6"] = true, ["7"] = true, ["8"] = true, ["9"] = true}
+-- what a cut through a letter leaves, never a character of its own
+local PUNCT = {
+    ["."] = true, [","] = true, ["-"] = true, ["="] = true, [":"] = true, [";"] = true, _ = true,
+    ["'"] = true, ["\""] = true, ["*"] = true, ["+"] = true, ["º"] = true, ["ª"] = true,
+}
+-- read_word: a piece is cut when read with less confidence than CUT_CONF
+-- and WIDE times the usual width of the line; each character costs
+-- CHAR_COST × that width, a stroke or a mark made by a cut STROKE_COST × its own
+const WIDE = 1.3
+const CUT_CONF = 0.97
+const CHAR_COST = 0.04
+const STROKE_COST = 0.08
 
--- a wide character read with little confidence may be two touching ones
--- ("20" read as "a"): cut it at the columns with the least ink and keep the
--- cut whose halves both read clearly better. → [ {pred, info} ]
-local function read_char(mdl, img, ch_info, opts, depth)
-    local pred = classify_char(mdl, img, ch_info, opts)?
-    local whole = [{pred = pred, info = ch_info}]
-    local b = ch_info.bbox
-    local min_aspect = depth == 0 and 0.8 or 1.2
-    if opts.split_touching == false or depth >= 2 or b.w < b.h * min_aspect or b.w < 6 or pred.confidence >= 0.95
-        or b.h < ch_info.line_height * 0.4 then
-        return whole
-    end
-    local thr = opts.threshold or 128
+-- the columns of a piece where it may be two touching characters: the
+-- least ink (preferring the middle), at most `max_cuts`, apart from each
+-- other and from the edges
+local function cut_columns(img, b, thr, max_cuts, min_gap)
     local cols = []
-    for dx = math.max(2, b.w * 3 // 10), math.min(b.w - 3, b.w * 7 // 10) do
+    for dx = 2, b.w - 3 do
         local ink = 0
         for y = b.y, b.y + b.h - 1 do
             if img.data[y * img.width + b.x + dx] < thr then ink += 1 end
         end
-        -- the inside of an o has as little ink as a join: prefer the middle
-        cols[] = [dx, (ink + 1) * (1.0 + 3.0 * math.abs(dx / (b.w * 1.0) - 0.5))]
+        cols[] = [dx, (ink + 1) * (1.0 + 1.5 * math.abs(dx / (b.w * 1.0) - 0.5))]
     end
     sort.sort(cols, function(p, q) return p[1] < q[1] end)
+    -- the middle always: two touching characters of one width meet there
     local cuts = [b.w // 2]
-    for i = 0, len(cols) - 1 do
-        if len(cuts) >= 4 then break end
-        if not list.contains(cuts, cols[i][0]) then cuts[] = cols[i][0] end
-    end
-    local implausible = X_HEIGHT[pred.char] and b.h > ch_info.line_height * 0.62
-    local best = nil
-    local best_score = pred.confidence + 0.04
-    for _, dx in cuts do
-        local left = segment.char_info(img, {x = b.x, y = b.y, w = dx, h = b.h}, ch_info.line_top, ch_info.line_height, thr)
-        local right = segment.char_info(img, {x = b.x + dx, y = b.y, w = b.w - dx, h = b.h}, ch_info.line_top, ch_info.line_height, thr)
-        local lp = classify_char(mdl, img, left, opts)?
-        local rp = classify_char(mdl, img, right, opts)?
-        local score = math.min(lp.confidence, rp.confidence)
-        -- a lone stroke is what any cut of m, n, u or w leaves: no half may
-        -- be one, but for a 1 beside a digit ("10"), or when the piece is too
-        -- tall for the x-height letter it was read as ("IN" read as m)
-        local function allowed(c, other)
-            if not STROKE[c] then return true end
-            if c == "1" and DIGIT[other] then return true end
-            return implausible and STEM[c] == true
+    for _, c in cols do
+        if len(cuts) >= max_cuts then break end
+        local far = c[0] >= min_gap and b.w - c[0] >= min_gap
+        for _, d in cuts do
+            if math.abs(d - c[0]) < min_gap then far = false end
         end
-        local ok = allowed(lp.char, rp.char) and allowed(rp.char, lp.char)
-        if ok and score > best_score then
-            best_score = score
-            best = [left, right]
+        if far then cuts[] = c[0] end
+    end
+    sort.sort(cuts)
+    return cuts
+end
+
+-- a word read by recognition: wide pieces read with little confidence are
+-- cut into slices at their ink valleys, and the slices are grouped again
+-- (up to 4 a character) the way whose characters read best: the sum over
+-- characters of width × confidence, less a cost for each character. A whole
+-- piece keeps its own reading (accents included); a lone stroke made by a
+-- cut is what any cut of m, n, u or w leaves, so it costs more, but for a 1
+-- beside a digit ("10") or in a piece too tall for the x-height letter it
+-- was read as ("IN" read as m). → [ {pred, info} ]
+local function read_word(mdl, img, chars, opts, ref_w)
+    local thr = opts.threshold or 128
+    local atoms = []
+    for pi, ch in chars do
+        local pred = classify_char(mdl, img, ch, opts)?
+        local b = ch.bbox
+        local line_h = ch.line_height
+        local cuts = []
+        if opts.split_touching ~= false and pred.confidence < CUT_CONF and b.w >= 6 and b.w >= b.h * 0.7 and
+            b.w >= ref_w * WIDE and
+            b.h >= line_h * 0.4 then
+            cuts = cut_columns(img, b, thr, 3, math.max(2, line_h // 8))
+        end
+        local implausible = X_HEIGHT[pred.char] and b.h > line_h * 0.62
+        local x0 = 0
+        local edges = list.concat(cuts, [b.w])
+        for k, x1 in edges do
+            atoms[] = {
+                piece = pi, first = k == 0, last = k == len(edges) - 1, x = b.x + x0, w = x1 - x0, y = b.y, h = b.h,
+                pred = pred, info = ch, implausible = implausible,
+            }
+            x0 = x1
         end
     end
-    if best == nil then return whole end
+    local n = len(atoms)
+
+    local pen = CHAR_COST * ref_w
+    local best = [0.0]
+    local from = [-1]
+    local reading = [nil]
+    for j = 1, n do
+        best[] = -1e18
+        from[] = -1
+        reading[] = nil
+        for i = math.max(0, j - 4), j - 1 do
+            local a = atoms[i]
+            local z = atoms[j - 1]
+            local whole = a.piece == z.piece and a.first and z.last
+            local x0 = a.x
+            local x1 = z.x + z.w
+            local line_h = a.info.line_height
+            -- pieces joined into one character: where a stroke broke ("0"
+            -- read as "(" and the start of the next piece), so one side must
+            -- be a slice cut from a piece, across a small gap; at a cost.
+            -- Two whole pieces never join ("-1" would read as 4)
+            local joins = 0
+            local joinable = true
+            for k = i + 1, j - 1 do
+                local l = atoms[k - 1]
+                local r = atoms[k]
+                if r.piece ~= l.piece then
+                    joins += 1
+                    local gap = r.x - (l.x + l.w)
+                    local sliced = not (l.first and l.last) or not (r.first and r.last)
+                    if not sliced or gap > math.max(1, line_h // 12) then joinable = false end
+                end
+            end
+            if joinable and (whole or x1 - x0 <= line_h * 1.6) then
+                local pred = nil
+                local info = nil
+                if whole then
+                    pred = a.pred
+                    info = a.info
+                else
+                    local y0 = a.y
+                    local y1 = a.y + a.h
+                    for k = i, j - 1 do
+                        y0 = math.min(y0, atoms[k].y)
+                        y1 = math.max(y1, atoms[k].y + atoms[k].h)
+                    end
+                    info = segment.char_info(img, {x = x0, y = y0, w = x1 - x0, h = y1 - y0}, a.info.line_top, line_h, thr)
+                    pred = classify_char(mdl, img, info, opts)?
+                end
+                local w = x1 - x0
+                local score = w * pred.confidence - pen - joins * 0.05 * w
+                -- an x-height letter as tall as a capital is a misreading
+                if X_HEIGHT[pred.char] and info.bbox.h > line_h * 0.62 then score -= 0.1 * w end
+                if not whole and PUNCT[pred.char] then
+                    -- but for a hyphen touching a digit ("2026-10"): flat,
+                    -- low and in the middle of the line
+                    local tb = info.bbox
+                    local mid = tb.y + tb.h / 2.0 - info.line_top
+                    local hyphen = (pred.char == "-" or pred.char == "." or pred.char == "_") and tb.w >= tb.h * 1.5 and
+                        tb.h < line_h * 0.2 and
+                        mid > line_h * 0.3 and mid < line_h * 0.75
+                    if not hyphen then score -= STROKE_COST * w end
+                elseif not whole and STROKE[pred.char] then
+                    local stem_ok = STEM[pred.char] and a.implausible and z.implausible
+                    if not stem_ok and pred.char ~= "1" then score -= STROKE_COST * w end
+                end
+                if best[i] + score > best[j] then
+                    best[j] = best[i] + score
+                    from[j] = i
+                    reading[j] = {pred = pred, info = info}
+                end
+            end
+        end
+    end
     local out = []
-    for _, half in best do
-        for _, r in read_char(mdl, img, half, opts, depth + 1)? do out[] = r end
+    local j = n
+    while j > 0 do
+        out[] = reading[j]
+        j = from[j]
     end
-    return out
+    return list.reversed(out)
 end
 
 local function resolve_image(source)
@@ -185,6 +279,12 @@ function M.recognize(source, opts)
     local total_char_count = 0
 
     for _, line in page.lines do
+        -- the usual width of a character in the line
+        local widths = []
+        for _, word in line.words do
+            for _, ch in word.chars do widths[] = ch.bbox.w end
+        end
+        local line_ref_w = math.max(2, len(widths) > 0 and list.median(widths) or 2)
         local word_entries = []
         local word_texts = []
         local line_chars = []
@@ -195,10 +295,7 @@ function M.recognize(source, opts)
             local char_strs = []
             local word_conf_sum = 0.0
 
-            local pieces = []
-            for _, ch_info in word.chars do
-                for _, r in read_char(mdl, proc_img, ch_info, opts, 0)? do pieces[] = r end
-            end
+            local pieces = read_word(mdl, proc_img, word.chars, opts, line_ref_w)?
             for _, piece in pieces do
                 local pred = piece.pred
                 local ch_info = piece.info
