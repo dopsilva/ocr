@@ -709,15 +709,23 @@ function Font.glyph_image(self, ch, opts)
     local h = len(rows)
     local w = len(rows[0])
     local img = image.new(w * scale + pad * 2, h * scale + pad * 2, 255)
+    local iw = img.width
+    local ih = img.height
+    local data = img.data
+    local extra = bold and 1 or 0
     for y = 0, h - 1 do
         local row = rows[y]
         for x = 0, w - 1 do
-            local c = string.sub(row, x + 1, x + 1)
-            if c == "#" or c == "@" or c == "1" or c == "*" then
-                local extra = bold and 1 or 0
+            local c = string.byte(row, x + 1)
+            -- ink: # @ 1 * and + (half coverage in glyphs.sea)
+            if c == 35 or c == 64 or c == 49 or c == 42 or c == 43 then
                 for sy = 0, scale - 1 + extra do
-                    for sx = 0, scale - 1 + extra do
-                        img:set(pad + x * scale + sx, pad + y * scale + sy, 0)
+                    local py = pad + y * scale + sy
+                    if py < ih then
+                        for sx = 0, scale - 1 + extra do
+                            local px = pad + x * scale + sx
+                            if px < iw then data[py * iw + px] = 0 end
+                        end
                     end
                 end
             end
@@ -788,7 +796,7 @@ function Font.render(self, text, opts)
                         local r_str = rows[gy]
                         for gx = 0, len(r_str) - 1 do
                             local c = string.sub(r_str, gx + 1, gx + 1)
-                            if c == "#" or c == "@" or c == "1" or c == "*" then
+                            if c == "#" or c == "@" or c == "1" or c == "*" or c == "+" then
                                 local extra = bold and 1 or 0
                                 for sy = 0, scale - 1 + extra do
                                     for sx = 0, scale - 1 + extra do

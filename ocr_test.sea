@@ -141,8 +141,9 @@ end)
 
 t.describe("neural MLP training (libs/tensor) and custom fonts", function()
     t.it("trains the tensor MLP classifier and recognizes text in mlp and hybrid modes", function()
-        local eng = ocr.new_engine()
-        local stats = t.no_error(eng:train({epochs = 30, lr = 0.015}))
+        -- one stroke a face: a smaller model, quick to train
+        local eng = ocr.new_engine({strokes = ["#+"]})
+        local stats = t.no_error(eng:train({epochs = 60, lr = 0.015}))
         -- 133 classes, accented twins included (a, á, à, â, ã...): the fit is lower than with 73
         t.gt(stats.accuracy, 0.85)
 

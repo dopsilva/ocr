@@ -26,7 +26,10 @@ Biblioteca de **OCR (Optical Character Recognition)** escrita em **[Sea](https:/
 - **Correção por contexto** (`context.sea`), por linha: maiúscula/minúscula de letras de mesmo desenho (`c o s u v w x z`) pela altura comparada à altura-x e à das maiúsculas da linha; em trechos numéricos as letras parecidas viram dígitos (`O→0`, `l/I→1`, `S→5`…) e o inverso em palavras; `I`/`l` pela caixa da palavra; `.`, `-` e `_` pela geometria
 - **Classificador Híbrido (Template Estrutural + Rede Neural MLP com `libs/tensor`)**:
   - Extrator de características de **224 dimensões** (`float_array`): grid normalizado 10×14, projeções horizontais/verticais, perfis de contorno externo, cruzamentos de traço e topologia (furos/Euler + razão de aspecto + posição relativa na linha)
-  - Fonte bitmap 5×7 e glifos TrueType embutidos: `DejaVuSansMono` Regular e Bold, e em [`glyphs.sea`](glyphs.sea) (gerado por [`tools/gen_glyphs.sea`](tools/gen_glyphs.sea) com o rasterizador TrueType em Sea puro [`libs/truetype`](../sea_vm/libs/truetype/truetype.sea), sem Python) DejaVu Sans/Serif/Mono, Liberation Sans/Serif/Mono, Noto Sans/Serif e Ubuntu — 133 classes: `A-Z`, `a-z`, `0-9`, pontuação, `$ % & * # @ ; ' " _` e as letras acentuadas
+  - Fonte bitmap 5×7 e glifos TrueType embutidos: `DejaVuSansMono` Regular e Bold, e em [`glyphs.sea`](glyphs.sea) (gerado por [`tools/gen_glyphs.sea`](tools/gen_glyphs.sea) com o rasterizador TrueType em Sea puro [`libs/truetype`](../sea_vm/libs/truetype/truetype.sea), sem Python) 17 faces: DejaVu Sans/Serif/Mono (e Sans Bold, Serif Bold, Serif Condensed), Liberation Sans/Serif/Mono (e Sans Bold, Serif Bold), Noto Sans/Serif (e Serif Bold, Serif Condensed), Gentium Basic e Ubuntu — 133 classes: `A-Z`, `a-z`, `0-9`, pontuação, `$ % & * # @ ; ' " _` e as letras acentuadas
+  - Cada glifo é gravado com quatro níveis de cobertura e aprendido em três espessuras de traço (fina, normal e grossa; `model.STROKES`): uma fonte um pouco mais leve ou mais pesada que as do treino ainda encontra as suas formas. Várias serifadas no treino ensinam o que uma serifada desconhecida tem em comum com elas
+  - Os protótipos do modelo padrão ficam em cache em `~/.cache/sea-ocr/` (ou `$XDG_CACHE_HOME`): a primeira execução leva ~3,5 s para montá-los, as seguintes ~0,2 s. A chave é o hash dos glifos e das opções, e ao carregar os protótipos da fonte bitmap são refeitos e comparados (uma mudança no código das características refaz o cache). `model.new({cache = false})` não usa o cache
+  - A comparação com os protótipos é um produto matriz-vetor (`tensor.matvec`) contra a matriz dos protótipos normalizados, ~17× mais rápida que o cosseno em Sea
   - Acerto por caractere em texto renderizado (11 fontes, 4 tamanhos, texto em inglês e em português): ~95% em 24–36 px, ~80% em 12 px, ~89% na média, ~85% em fontes que não estão no treino
   - Treinamento neural com `libs/tensor` (`matvec`, `rmsnorm`, `relu`, `softmax`, `adam`) e persistência de modelos em JSON (`save`/`load`)
 
@@ -40,7 +43,7 @@ Biblioteca de **OCR (Optical Character Recognition)** escrita em **[Sea](https:/
 | [`segment.sea`](segment.sea) | Segmentação de linhas, palavras e caracteres com bounding boxes (e as peças de cada caractere) |
 | [`accents.sea`](accents.sea) | Letra + marca (ponto, agudo, grave, circunflexo, til, trema) lidas à parte e compostas |
 | [`context.sea`](context.sea) | Correções por linha: caixa pela altura, dígitos × letras por trecho, `I`/`l`, pontuação pela geometria |
-| [`glyphs.sea`](glyphs.sea) | Glifos pré-rasterizados de 11 fontes, com acentos (gerado por `tools/gen_glyphs.sea`) |
+| [`glyphs.sea`](glyphs.sea) | Glifos pré-rasterizados de 17 faces, com acentos e quatro níveis de cobertura (gerado por `tools/gen_glyphs.sea`) |
 | [`features.sea`](features.sea) | Extração de vetor de características de 224 dimensões (`float_array`) |
 | [`font.sea`](font.sea) | Fonte bitmap 5×7 embutida, registro de fontes customizadas e renderizador de texto |
 | [`ttf_font.sea`](ttf_font.sea) | Glifos TrueType (`DejaVuSansMono` Regular & Bold) pré-rasterizados em Sea |

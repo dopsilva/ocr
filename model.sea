@@ -21,10 +21,35 @@ M.EXTRA_CHARS = nil
 
 -- the faces of glyphs.sea the default model learns (tools/gen_glyphs.sea)
 M.EXTRA_FONTS = ["dejavu_sans_mono", "dejavu_sans", "dejavu_sans_bold", "dejavu_serif", "liberation_sans", "liberation_serif",
-    "liberation_sans_bold", "liberation_mono", "noto_sans", "noto_serif", "ubuntu"]
+    "liberation_sans_bold", "liberation_mono", "noto_sans", "noto_serif", "ubuntu", "gentium_basic", "dejavu_serif_condensed",
+    "dejavu_serif_bold", "liberation_serif_bold", "noto_serif_bold", "noto_serif_condensed"]
+-- the strokes each face is learned with: the coverage levels of glyphs.sea
+-- taken as ink ("#" thin, "#+" normal, "#+-" bold), so a font a little
+-- lighter or heavier than those learned still finds its shapes
+M.STROKES = ["#", "#+", "#+-"]
 const DEFAULT_HIDDEN = 64
 
 local Model = {}
+
+-- the cache of the default model (defined at the end)
+local Cache = {}
+
+-- the glyphs of a face with the given coverage levels as ink ("#")
+local function stroke(glyph_map, levels)
+    local out = {}
+    for ch, rows in glyph_map do
+        local r2 = []
+        for _, row in rows do
+            local s = row
+            for _, lv in utf8.chars("#+-") do
+                s = string.replace(s, lv, string.contains(levels, lv) and "@" or ".")
+            end
+            r2[] = string.replace(s, "@", "#")
+        end
+        out[ch] = r2
+    end
+    return out
+end
 
 -- Extract a contextualized feature vector from a font glyph at a given scale and stroke style
 local function glyph_descriptor(font_obj, ch, scale, bold, line_contextual)
@@ -73,6 +98,28 @@ function Model.add_feature(self, label, feat_vec)
     }
     self.mlp_trained = false
     return self
+end
+
+-- the prototypes as unit-length columns (w[i * n + j] = feature i of sample
+-- j), made again when samples were added
+local function prototype_matrix(self)
+    local n = len(self.samples)
+    if self.protos ~= nil and self.protos_n == n then return self.protos end
+    local w = float_array(FEAT_DIM * n)
+    w[FEAT_DIM * n - 1] = 0.0
+    for j, s in self.samples do
+        local f = s.feat
+        local norm = 0.0
+        for i = 0, FEAT_DIM - 1 do norm += f[i] * f[i] end
+        local inv = norm > 1e-12 and 1.0 / math.sqrt(norm) or 0.0
+        for i = 0, FEAT_DIM - 1 do w[i * n + j] = f[i] * inv end
+    end
+    local sims = float_array(n)
+    sims[n - 1] = 0.0
+    self.protos = w
+    self.protos_n = n
+    self.sims = sims
+    return w
 end
 
 -- model:add_sample(label, img_or_char_info [, opts]) → extracts features and adds training sample
@@ -317,15 +364,27 @@ function Model.classify(self, item, opts)
 
     local feat = item.feat or features.extract(item, opts)
 
-    -- 1. Best cosine similarity per class across prototypes
+    -- 1. Best cosine similarity per class across prototypes: one product of
+    -- the feature with the matrix of unit-length prototypes (libs/tensor)
     local best_sim = float_array(n_classes)
     for _ = 0, n_classes - 1 do best_sim[] = -1.0 end
 
-    if mode ~= "mlp" then
-        for _, s in self.samples do
-            local sim = features.cosine(feat, s.feat)
-            if sim > best_sim[s.class_idx] then
-                best_sim[s.class_idx] = sim
+    local n_samples = len(self.samples)
+    if mode ~= "mlp" and n_samples > 0 then
+        local protos = prototype_matrix(self)
+        local norm = 0.0
+        for i = 0, FEAT_DIM - 1 do norm += feat[i] * feat[i] end
+        if norm > 1e-12 then
+            local sims = self.sims
+            tensor.matvec(feat, 0, protos, FEAT_DIM, n_samples, sims, 0)
+            local inv = 1.0 / math.sqrt(norm)
+            for j, s in self.samples do
+                local sim = sims[j] * inv
+                if sim > best_sim[s.class_idx] then best_sim[s.class_idx] = sim end
+            end
+        else
+            for _, s in self.samples do
+                if best_sim[s.class_idx] < 0.0 then best_sim[s.class_idx] = 0.0 end
             end
         end
     end
@@ -418,13 +477,19 @@ function Model.save(self, file_path)
     return fs.write(file_path, encoded)
 end
 
--- model.new([opts]) → empty or default-initialized Model
+-- model.new([opts]) → empty or default-initialized Model. opts: faces (the glyphs.sea
+-- faces, default M.EXTRA_FONTS), strokes (default M.STROKES), cache (false: the
+-- default model is not read from or written to the cache), font, load_builtin_font,
+-- load_ttf_font, train_mlp, hidden_dim, mode
 function M.new(opts)
     opts = opts or {}
     local self = {}
     self.labels = []
     self.label_to_idx = [=]
     self.samples = []
+    self.protos = nil
+    self.protos_n = 0
+    self.sims = nil
     self.hidden_dim = opts.hidden_dim or DEFAULT_HIDDEN
     self.mode = opts.mode or "hybrid"
     self.mlp_trained = false
@@ -436,23 +501,121 @@ function M.new(opts)
     end
 
     if opts.load_builtin_font ~= false then
+        -- the default model's prototypes are the same on every run: they
+        -- come from a cache file when one matches (opts.cache = false: never)
+        local cacheable = not opts.font and opts.font_opts == nil and opts.load_ttf_font ~= false and opts.cache ~= false
+            and opts.faces == nil and opts.strokes == nil
+        local cache = cacheable and Cache.paths() or nil
+        if cache ~= nil and Cache.load(self, cache) then
+            if opts.train_mlp then self:train(opts.train_opts) end
+            return self
+        end
         self:register_font(opts.font or font.builtin(), opts.font_opts)
         if not opts.font and opts.load_ttf_font ~= false then
             self:register_font(ttf_font.regular(), {scales = [1, 2], include_bold = false})
             self:register_font(ttf_font.bold(), {scales = [1], include_bold = false})
             -- sans, serif and mono faces with accented letters (glyphs.sea)
-            for _, name in M.EXTRA_FONTS do
+            for _, name in opts.faces or M.EXTRA_FONTS do
                 local g = glyphs[name]
-                self:register_font(font.new(g.glyphs, g.height // 2, g.height),
-                    {scales = [1], include_bold = false, only = M.EXTRA_CHARS})
+                for _, levels in opts.strokes or M.STROKES do
+                    self:register_font(font.new(stroke(g.glyphs, levels), g.height // 2, g.height),
+                        {scales = [1], include_bold = false, only = M.EXTRA_CHARS})
+                end
             end
         end
+        if cache ~= nil then Cache.save(self, cache) end
         if opts.train_mlp then
             self:train(opts.train_opts)
         end
     end
 
     return self
+end
+
+-- ---- the cache of the default model's prototypes ----
+-- <cache dir>/sea-ocr/<key>.f64 (the features, raw doubles) and .labels
+-- (one label a line). The key hashes everything the prototypes are made
+-- from: the glyph data, the faces, strokes and characters. A change in the
+-- feature code is caught on loading: the bitmap font's prototypes, which
+-- come first, are made again and must match the file.
+
+local function hash_glyphs(h, glyph_map)
+    local keys = []
+    for ch, _ in glyph_map do keys[] = ch end
+    sort.sort(keys)
+    for _, ch in keys do
+        h:update(ch)
+        h:update("\0")
+        h:update(string.join(glyph_map[ch], "|"))
+        h:update("\n")
+    end
+end
+
+function Cache.paths()
+    local base = os.getenv("XDG_CACHE_HOME")
+    if base == nil or base == "" then
+        local home = os.getenv("HOME")
+        if home == nil or home == "" then return nil end
+        base = path.join(home, ".cache")
+    end
+    local h = hash.new("sha256")
+    h:update(`v1|${FEAT_DIM}|${string.join(M.EXTRA_FONTS, ",")}|${string.join(M.STROKES, ",")}|${M.EXTRA_CHARS or "*"}\n`)
+    hash_glyphs(h, font.builtin().glyphs)
+    hash_glyphs(h, ttf_font.regular().glyphs)
+    hash_glyphs(h, ttf_font.bold().glyphs)
+    for _, name in M.EXTRA_FONTS do
+        h:update(`${name}:${glyphs[name].height}\n`)
+        hash_glyphs(h, glyphs[name].glyphs)
+    end
+    local dir = path.join(base, "sea-ocr")
+    local stem = path.join(dir, string.sub(h:digest(), 1, 32))
+    return {dir = dir, feats = stem .. ".f64", labels = stem .. ".labels"}
+end
+
+function Cache.load(self, cache)
+    if not fs.exists(cache.feats) or not fs.exists(cache.labels) then return false end
+    local text = fs.read(cache.labels)
+    if is_error(text) then return false end
+    local labels = string.splitlines(text)
+    local n = len(labels)
+    if n == 0 then return false end
+    local all = float_array(n * FEAT_DIM)
+    all[n * FEAT_DIM - 1] = 0.0
+    if is_error(tensor.load(cache.feats, all, 0)) then return false end
+    -- the bitmap font made again: it must give the same features
+    local check = M.new({load_builtin_font = false})
+    check:register_font(font.builtin())
+    if len(check.samples) > n then return false end
+    for j, s in check.samples do
+        if s.label ~= labels[j] then return false end
+        for i = 0, FEAT_DIM - 1 do
+            if math.abs(s.feat[i] - all[j * FEAT_DIM + i]) > 1e-9 then return false end
+        end
+    end
+    for j, label in labels do
+        local f = float_array(FEAT_DIM)
+        f[FEAT_DIM - 1] = 0.0
+        tensor.copy(f, 0, all, j * FEAT_DIM, FEAT_DIM)
+        self:add_feature(label, f)
+    end
+    return true
+end
+
+function Cache.save(self, cache)
+    -- a cache that cannot be written is only slower: errors are ignored
+    if is_error(fs.mkdir(cache.dir, {parents = true})) then return end
+    local n = len(self.samples)
+    local all = float_array(n * FEAT_DIM)
+    all[n * FEAT_DIM - 1] = 0.0
+    local labels = []
+    for j, s in self.samples do
+        tensor.copy(all, j * FEAT_DIM, s.feat, 0, FEAT_DIM)
+        labels[] = s.label
+    end
+    local tmp = `${cache.feats}.${process.pid()}.tmp`
+    if is_error(tensor.save(tmp, all)) then return end
+    if is_error(fs.rename(tmp, cache.feats)) then return end
+    fs.write(cache.labels, string.join(labels, "\n") .. "\n", {atomic = true})
 end
 
 -- model.load(file_path) → Model|error

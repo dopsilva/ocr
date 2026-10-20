@@ -372,8 +372,82 @@ end
 
 -- preprocess.resize(img, new_w, new_h [, opts]) → Image
 -- Area-averaging / bilinear resampling for smooth character normalization.
+-- the taps of one axis of resize: for each destination index, the source
+-- indexes and weights of an area sample ([i, w, i, w, ...]), whether that
+-- area spans more than one source pixel, and the two bilinear taps
+local function resize_axis(src_n, dst_n)
+    local box = []
+    local spans = []
+    local lin = []
+    for d = 0, dst_n - 1 do
+        local s0 = (d * src_n * 1.0) / dst_n
+        local s1 = ((d + 1) * src_n * 1.0) / dst_n
+        local i0 = math.floor(s0)
+        local i1 = math.min(src_n - 1, math.floor(s1))
+        local taps = []
+        for i = i0, i1 do
+            local wt = 1.0
+            if i < s0 then wt = 1.0 - (s0 - i) end
+            if i + 1 > s1 then wt = wt - ((i + 1) - s1) end
+            if wt <= 0 then wt = 0.01 end
+            taps[] = i
+            taps[] = wt
+        end
+        box[] = taps
+        spans[] = i1 > i0
+        local u = ((d + 0.5) * src_n) / dst_n - 0.5
+        local x0 = math.max(0, math.min(src_n - 1, math.floor(u)))
+        local x1 = math.min(src_n - 1, x0 + 1)
+        local f = math.max(0.0, u - x0)
+        lin[] = [x0, 1 - f, x1, f]
+    end
+    return box, spans, lin
+end
+
+-- resize without margins: an area sample where a destination pixel covers
+-- more than one source pixel (on either axis), else bilinear
+local function resize_plain(img, out, new_w, new_h)
+    local sw = img.width
+    local src = img.data
+    local dst = out.data
+    local bx, sx, lx = resize_axis(sw, new_w)
+    local by, sy, ly = resize_axis(img.height, new_h)
+    for dy = 0, new_h - 1 do
+        local ty = by[dy]
+        local lyd = ly[dy]
+        for dx = 0, new_w - 1 do
+            if sx[dx] or sy[dy] then
+                local tx = bx[dx]
+                local sum = 0.0
+                local wsum = 0.0
+                for a = 0, len(ty) - 1, 2 do
+                    local row = ty[a] * sw
+                    local wy = ty[a + 1]
+                    for b = 0, len(tx) - 1, 2 do
+                        local weight = tx[b + 1] * wy
+                        sum += src[row + tx[b]] * weight
+                        wsum += weight
+                    end
+                end
+                dst[dy * new_w + dx] = math.round(sum / wsum)
+            else
+                local l = lx[dx]
+                local r0 = lyd[0] * sw
+                local r1 = lyd[2] * sw
+                local val = src[r0 + l[0]] * l[1] * lyd[1] + src[r0 + l[2]] * l[3] * lyd[1] +
+                    src[r1 + l[0]] * l[1] * lyd[3] + src[r1 + l[2]] * l[3] * lyd[3]
+                dst[dy * new_w + dx] = math.round(val)
+            end
+        end
+    end
+    return out
+end
+
 function M.resize(img, new_w, new_h, opts)
     opts = opts or {}
+    if not opts.preserve_aspect and not opts.binarize and img.width > 0 and img.height > 0 and new_w > 0 and new_h > 0 then
+        return resize_plain(img, image.new(new_w, new_h, 255), new_w, new_h)
+    end
     local out = image.new(new_w, new_h, 255)
     local sw = img.width
     local sh = img.height
