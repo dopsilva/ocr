@@ -129,7 +129,11 @@ function M.mark_kind(img, marks)
     end
     if top_n == 0 or bot_n == 0 then return "dot" end
     local lean = top_x / top_n - bot_x / bot_n
-    if math.abs(lean) < math.max(1.0, w * 0.15) and filled >= w * h * 0.55 then return "dot" end
+    if math.abs(lean) < math.max(1.0, w * 0.15) then
+        -- upright: a solid dot, or a small hollow circumflex (^)
+        if filled >= w * h * 0.55 or w < 3 then return "dot" end
+        return "circumflex"
+    end
     if lean > 0 then return "acute" end
     if lean < 0 then return "grave" end
     return "dot"

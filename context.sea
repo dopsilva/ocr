@@ -90,14 +90,22 @@ function M.fix_line(words)
     local baseline = median(bottoms)
 
     for _, w in words do
-        -- small marks: a dash is wide, a dot is not; a dash on the baseline is "_"
+        -- small marks: a dash is wide, a dot is not; a dash on the baseline
+        -- is "_"; a comma goes below the baseline, an apostrophe is up high
         if H ~= nil and baseline ~= nil then
             for _, ch in w.chars do
                 local c = ch.char
-                if (c == "." or c == "-" or c == "_") and ch.bbox.h < H * 0.4 then
+                if (c == "." or c == "-" or c == "_" or c == "," or c == "'") and ch.bbox.h < H * 0.5 then
                     local mid = ch.bbox.y + ch.bbox.h / 2.0
-                    if ch.bbox.w >= ch.bbox.h * 2.0 then
+                    local bottom = ch.bbox.y + ch.bbox.h
+                    if ch.bbox.w >= ch.bbox.h * 2.0 and ch.bbox.w >= X * 0.3 then
                         ch.char = mid < baseline - X * 0.2 and "-" or "_"
+                    elseif mid < baseline - X * 0.6 then
+                        -- up high: an apostrophe
+                        ch.char = "'"
+                    elseif bottom > baseline + X * 0.15 then
+                        -- below the baseline: a comma's tail
+                        ch.char = ","
                     else
                         ch.char = "."
                     end
