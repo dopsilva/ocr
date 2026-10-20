@@ -143,7 +143,8 @@ t.describe("neural MLP training (libs/tensor) and custom fonts", function()
     t.it("trains the tensor MLP classifier and recognizes text in mlp and hybrid modes", function()
         local eng = ocr.new_engine()
         local stats = t.no_error(eng:train({epochs = 30, lr = 0.015}))
-        t.gt(stats.accuracy, 0.95)
+        -- 133 classes, accented twins included (a, á, à, â, ã...): the fit is lower than with 73
+        t.gt(stats.accuracy, 0.85)
 
         local img = ocr.font.render("TENSOR MLP 987", {scale = 2})
         local res_mlp = t.no_error(eng:recognize(img, {mode = "mlp"}))
@@ -187,5 +188,28 @@ t.describe("neural MLP training (libs/tensor) and custom fonts", function()
 
         local loaded_mdl = t.no_error(ocr.model.load(mdl_path))
         t.eq(ocr.read(img, {model = loaded_mdl}), "XOXO OXOX")
+    end)
+end)
+
+t.describe("accents and context", function()
+    local glyphs = require("./glyphs")
+    local sans = ocr.font.new(glyphs.liberation_sans.glyphs, 11, glyphs.liberation_sans.height)
+
+    t.it("reads Portuguese accented text as letter + mark", function()
+        local img = sans:render("Ação e coração: está ótimo, João!", {scale = 1, char_spacing = 0, space_width = 7})
+        t.eq(t.no_error(ocr.read(img)), "Ação e coração: está ótimo, João!")
+    end)
+
+    t.it("reads digits in numbers and letters in words", function()
+        local img = sans:render("INVOICE 2026-10-20 TOTAL 1450.00", {scale = 1, char_spacing = 0, space_width = 7})
+        t.eq(t.no_error(ocr.read(img)), "INVOICE 2026-10-20 TOTAL 1450.00")
+    end)
+
+    t.it("composes letters and marks", function()
+        t.eq(ocr.accents.compose("a", "acute"), "á")
+        t.eq(ocr.accents.compose("O", "tilde"), "Õ")
+        t.eq(ocr.accents.compose("l", "dot"), "i")
+        t.eq(ocr.accents.compose("1", "acute"), "í")
+        t.eq(ocr.accents.compose("x", "acute"), nil)
     end)
 end)

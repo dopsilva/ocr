@@ -7,11 +7,21 @@ local tensor = require("../sea_vm/libs/tensor/tensor")
 local features = require("./features")
 local font = require("./font")
 local ttf_font = require("./ttf_font")
+local glyphs = require("./glyphs")
 local preprocess = require("./preprocess")
 
 local M = {}
 
 const FEAT_DIM = features.FEAT_DIM
+
+-- the characters the default model learns from glyphs.sea (nil: all of them;
+-- a string restricts it). Accented letters keep their own templates: a mark
+-- touching its letter (small text) cannot be read apart (accents.sea)
+M.EXTRA_CHARS = nil
+
+-- the faces of glyphs.sea the default model learns (tools/gen_glyphs.sea)
+M.EXTRA_FONTS = ["dejavu_sans_mono", "dejavu_sans", "dejavu_sans_bold", "dejavu_serif", "liberation_sans", "liberation_serif",
+    "liberation_sans_bold", "liberation_mono", "noto_sans", "noto_serif", "ubuntu"]
 const DEFAULT_HIDDEN = 64
 
 local Model = {}
@@ -79,6 +89,8 @@ function Model.register_font(self, font_obj, opts)
     if include_bold == nil then include_bold = true end
 
     for _, ch in font_obj:chars() do
+        -- opts.only: a string of the characters to learn (others are skipped)
+        if opts.only ~= nil and not string.contains(opts.only, ch) then continue end
         for _, s in scales do
             -- Contextualized prototype (relative to full font line height)
             local desc_ctx = glyph_descriptor(font_obj, ch, s, false, true)
@@ -428,6 +440,12 @@ function M.new(opts)
         if not opts.font and opts.load_ttf_font ~= false then
             self:register_font(ttf_font.regular(), {scales = [1, 2], include_bold = false})
             self:register_font(ttf_font.bold(), {scales = [1], include_bold = false})
+            -- sans, serif and mono faces with accented letters (glyphs.sea)
+            for _, name in M.EXTRA_FONTS do
+                local g = glyphs[name]
+                self:register_font(font.new(g.glyphs, g.height // 2, g.height),
+                    {scales = [1], include_bold = false, only = M.EXTRA_CHARS})
+            end
         end
         if opts.train_mlp then
             self:train(opts.train_opts)

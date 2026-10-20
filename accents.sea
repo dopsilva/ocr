@@ -1,0 +1,159 @@
+-- accents.sea — letters with a mark above them, read in two parts: the body
+-- is classified as a letter without accent, the mark by its shape (dot,
+-- acute, grave, circumflex, tilde, diaeresis), and the two are composed
+-- (a + acute = á, a dotless body + dot = i). Whole-glyph templates of accented
+-- letters are easily confused with their base letters; this is not.
+
+local preprocess = require("./preprocess")
+
+local M = {}
+
+local COMPOSE = {
+    acute = {a = "á", e = "é", i = "í", o = "ó", u = "ú", A = "Á", E = "É", I = "Í", O = "Ó", U = "Ú"},
+    grave = {a = "à", e = "è", i = "ì", o = "ò", u = "ù", A = "À", E = "È", I = "Ì", O = "Ò", U = "Ù"},
+    circumflex = {a = "â", e = "ê", i = "î", o = "ô", u = "û", A = "Â", E = "Ê", I = "Î", O = "Ô", U = "Û"},
+    tilde = {a = "ã", o = "õ", n = "ñ", A = "Ã", O = "Õ", N = "Ñ"},
+    diaeresis = {a = "ä", e = "ë", i = "ï", o = "ö", u = "ü", A = "Ä", E = "Ë", I = "Ï", O = "Ö", U = "Ü"},
+}
+
+-- the characters whose body a dot makes an i (or a j)
+local DOTLESS_I = {l = true, I = true, ["1"] = true, ["|"] = true, ["!"] = true, i = true}
+local DOTLESS_J = {j = true, J = true}
+
+local function union(boxes)
+    local x0 = boxes[0].x
+    local y0 = boxes[0].y
+    local x1 = boxes[0].x + boxes[0].w
+    local y1 = boxes[0].y + boxes[0].h
+    for _, b in boxes do
+        x0 = math.min(x0, b.x)
+        y0 = math.min(y0, b.y)
+        x1 = math.max(x1, b.x + b.w)
+        y1 = math.max(y1, b.y + b.h)
+    end
+    return {x = x0, y = y0, w = x1 - x0, h = y1 - y0}
+end
+
+-- accents.split(ch) → body box, mark boxes (or nil): the marks are parts
+-- wholly above the body and much smaller than it
+function M.split(ch)
+    local parts = ch.parts
+    if parts == nil or len(parts) < 2 then return nil, nil end
+    -- the body: the part with the most ink, with the parts beside it
+    local main = parts[0]
+    for _, p in parts do
+        if p.area > main.area then main = p end
+    end
+    local body = []
+    local marks = []
+    for _, p in parts do
+        if p.y + p.h <= main.y + 1 and p.h * 1.8 <= main.h then
+            marks[] = p
+        else
+            body[] = p
+        end
+    end
+    if len(marks) == 0 then return nil, nil end
+    return union(body), marks
+end
+
+-- the ink of a box: dark[y][x] (threshold 128)
+local function ink(img, b)
+    local rows = []
+    for y = b.y, b.y + b.h - 1 do
+        local r = []
+        for x = b.x, b.x + b.w - 1 do r[] = img:get(x, y) < 128 end
+        rows[] = r
+    end
+    return rows
+end
+
+-- accents.mark_kind(img, marks) → "dot" | "acute" | "grave" | "circumflex" | "tilde" | "diaeresis"
+function M.mark_kind(img, marks)
+    if len(marks) >= 2 then
+        -- two pieces side by side: a diaeresis
+        return "diaeresis"
+    end
+    local b = marks[0]
+    local rows = ink(img, b)
+    local w = b.w
+    local h = b.h
+    if w >= h * 1.6 then
+        -- wide: circumflex (highest in the middle) or tilde (high on the left
+        -- quarter, low on the right quarter)
+        local function top_at(x)
+            for y = 0, h - 1 do
+                if rows[y][x] then return y end
+            end
+            return h
+        end
+        local q1 = top_at(w // 4)
+        local mid = top_at(w // 2)
+        local q3 = top_at((3 * w) // 4)
+        local left = top_at(0)
+        local right = top_at(w - 1)
+        if mid <= q1 and mid <= q3 and left >= mid and right >= mid and (left > mid or right > mid) then
+            return "circumflex"
+        end
+        return "tilde"
+    end
+    -- compact: a dot, or a stroke leaning one way
+    local top_x = 0.0
+    local top_n = 0
+    local bot_x = 0.0
+    local bot_n = 0
+    local filled = 0
+    for y = 0, h - 1 do
+        for x = 0, w - 1 do
+            if rows[y][x] then
+                filled += 1
+                if y < h / 2.0 then
+                    top_x += x
+                    top_n += 1
+                else
+                    bot_x += x
+                    bot_n += 1
+                end
+            end
+        end
+    end
+    if top_n == 0 or bot_n == 0 then return "dot" end
+    local lean = top_x / top_n - bot_x / bot_n
+    if math.abs(lean) < math.max(1.0, w * 0.15) and filled >= w * h * 0.55 then return "dot" end
+    if lean > 0 then return "acute" end
+    if lean < 0 then return "grave" end
+    return "dot"
+end
+
+-- accents.compose(base, kind, body_box, line_bottom) → the letter, or nil
+function M.compose(base, kind)
+    if kind == "dot" then
+        if DOTLESS_I[base] then return "i" end
+        if DOTLESS_J[base] then return "j" end
+        return nil
+    end
+    local table_ = COMPOSE[kind]
+    if table_ == nil then return nil end
+    -- an accented i has a dotless body
+    if DOTLESS_I[base] then base = "i" end
+    return table_[base]
+end
+
+-- accents.body_info(ch, body, img) → a char info for the body alone
+function M.body_info(ch, body, img)
+    local line_h = ch.line_height
+    local line_top = ch.line_top
+    return {
+        bbox = body,
+        rel_top = (body.y - line_top) / (line_h * 1.0),
+        rel_bottom = (body.y + body.h - line_top) / (line_h * 1.0),
+        rel_height = body.h / (line_h * 1.0),
+        aspect = body.w / (math.max(1, body.h) * 1.0),
+        line_height = line_h,
+        line_top = line_top,
+        patch = preprocess.crop(img, body.x, body.y, body.w, body.h),
+        parts = nil,
+    }
+end
+
+return M

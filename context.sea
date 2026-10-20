@@ -1,0 +1,188 @@
+-- context.sea — line-level corrections after classification: letters whose
+-- upper and lower case have the same shape (c o s u v w x z) take their case
+-- from their height against the line's x-height and capital height; words
+-- of digits read look-alike letters as digits (O→0, l→1, S→5...) and words of
+-- letters the reverse; I/l follow the case of the word.
+
+local M = {}
+
+local function set_of(s)
+    local m = [=]
+    for _, c in utf8.chars(s) do m[c] = true end
+    return m
+end
+
+local CASE_PAIR = set_of("cosuvwxzCOSUVWXZ")
+-- letters only one height fits: x-height ones, and capitals / tall ones
+local X_ONLY = set_of("aemnr")
+local TALL_ONLY = set_of("ABDEFGHJKLMNPQRTbdfhk0123456789")
+local DIGITS = set_of("0123456789")
+local VOWELS = set_of("aeiouyAEIOUYáàâãäéèêëíìîïóòôõöúùûüÁÀÂÃÄÉÈÊËÍÌÎÏÓÒÔÕÖÚÙÛÜ")
+local LETTERS = set_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzáàâãäéèêëíìîïóòôõöúùûüçñÁÀÂÃÄÉÈÊËÍÌÎÏÓÒÔÕÖÚÙÛÜÇÑ")
+
+-- in a word of digits: the digit a letter is mistaken for. `strong` ones are
+-- taken always, the others only when the classifier also offered the digit
+local TO_DIGIT = {O = "0", o = "0", D = "0", Q = "0", l = "1", I = "1", i = "1", j = "1", J = "1",
+    Z = "2", z = "2", S = "5", s = "5", B = "8", G = "6", b = "6", g = "9", q = "9", A = "4"}
+local STRONG_DIGIT = set_of("OolI|")
+-- in a word of letters: the letter a digit is mistaken for (upper case form)
+local TO_LETTER = {["0"] = "O", ["1"] = "l", ["5"] = "S", ["8"] = "B", ["2"] = "Z", ["6"] = "G", ["4"] = "A"}
+local STRONG_LETTER = set_of("01")
+
+local function median(xs)
+    if len(xs) == 0 then return nil end
+    local s = sort.sorted(xs)
+    return s[len(s) // 2]
+end
+
+local function offered(ch, c)
+    if ch.candidates == nil then return false end
+    for _, cand in ch.candidates do
+        if cand.char == c then return true end
+    end
+    return false
+end
+
+local function is_upper(c) return string.upper(c) == c and string.lower(c) ~= c end
+local function is_lower(c) return string.lower(c) == c and string.upper(c) ~= c end
+
+-- the runs of a word: letters and digits between separators (- . , / : ...)
+local function runs_of(chars)
+    local runs = []
+    local cur = nil
+    for i, ch in chars do
+        if LETTERS[ch.char] or DIGITS[ch.char] or ch.char == "|" or ch.char == "!" then
+            if cur == nil then
+                cur = {first = i, last = i, numeric = false, digitlike = false}
+                runs[] = cur
+            end
+            cur.last = i
+        else
+
+            cur = nil
+        end
+    end
+    return runs
+end
+
+-- context.fix_line(words): words are {chars = [{char, bbox, candidates}], text};
+-- changes the chars in place and sets each word's text again
+function M.fix_line(words)
+    -- the line's heights and baseline, from the letters only one height fits
+    local x_heights = []
+    local tall_heights = []
+    local bottoms = []
+    for _, w in words do
+        for _, ch in w.chars do
+            if X_ONLY[ch.char] then x_heights[] = ch.bbox.h end
+            if TALL_ONLY[ch.char] then tall_heights[] = ch.bbox.h end
+            if X_ONLY[ch.char] or TALL_ONLY[ch.char] then bottoms[] = ch.bbox.y + ch.bbox.h end
+        end
+    end
+    local X = median(x_heights)
+    local H = median(tall_heights)
+    if X ~= nil and H == nil then H = X / 0.70 end
+    if H ~= nil and X == nil then X = H * 0.70 end
+    local baseline = median(bottoms)
+
+    for _, w in words do
+        -- small marks: a dash is wide, a dot is not; a dash on the baseline is "_"
+        if H ~= nil and baseline ~= nil then
+            for _, ch in w.chars do
+                local c = ch.char
+                if (c == "." or c == "-" or c == "_") and ch.bbox.h < H * 0.4 then
+                    local mid = ch.bbox.y + ch.bbox.h / 2.0
+                    if ch.bbox.w >= ch.bbox.h * 2.0 then
+                        ch.char = mid < baseline - X * 0.2 and "-" or "_"
+                    else
+                        ch.char = "."
+                    end
+                end
+            end
+        end
+
+        -- º and ª only follow a digit (1º, 2ª); elsewhere they are o and a
+        for i, ch in w.chars do
+            if (ch.char == "º" or ch.char == "ª") and not (i > 0 and DIGITS[w.chars[i - 1].char]) then
+                ch.char = ch.char == "º" and "o" or "a"
+            end
+        end
+
+        local n_upper = 0
+        local n_lower = 0
+        local n_letters = 0
+        for _, ch in w.chars do
+            local c = ch.char
+            if LETTERS[c] then
+                n_letters += 1
+                if not CASE_PAIR[c] and c ~= "l" and c ~= "I" then
+                    if is_upper(c) then n_upper += 1 elseif is_lower(c) then n_lower += 1 end
+                end
+            end
+        end
+
+        -- digits or letters, run by run; a run of letters that may all be
+        -- digits (O, l, I...) next to a run of digits across "." "," ":" "/"
+        -- or "-" is digits too ("145O.OO")
+        local runs = runs_of(w.chars)
+        for _, r in runs do
+            local nd = 0
+            local nl = 0
+            local all_digitlike = true
+            for i = r.first, r.last do
+                local c = w.chars[i].char
+                if DIGITS[c] then nd += 1 elseif LETTERS[c] or c == "|" or c == "!" then
+                    nl += 1
+                    if TO_DIGIT[c] == nil and c ~= "|" and c ~= "!" then all_digitlike = false end
+                end
+            end
+            r.numeric = nd > 0 and nd >= nl
+            r.digitlike = all_digitlike and nl > 0
+        end
+        for k, r in runs do
+            if not r.numeric and r.digitlike then
+                local prev_num = k > 0 and runs[k - 1].numeric and runs[k - 1].last + 1 == r.first - 1
+                local next_num = k < len(runs) - 1 and runs[k + 1].numeric and r.last + 2 == runs[k + 1].first
+                if prev_num or next_num then r.numeric = true end
+            end
+        end
+
+        for _, r in runs do
+            for i = r.first, r.last do
+                local ch = w.chars[i]
+                local c = ch.char
+                if r.numeric then
+                    local d = TO_DIGIT[c]
+                    if c == "|" or c == "!" then d = "1" end
+                    if d ~= nil and (STRONG_DIGIT[c] or offered(ch, d)) then ch.char = d end
+                else
+                    local l = TO_LETTER[c]
+                    if l ~= nil and n_letters > 0 and (STRONG_LETTER[c] or offered(ch, l) or offered(ch, string.lower(l))) then
+                        c = l
+                        ch.char = l
+                    end
+                    -- the case of same-shaped letters, by height
+                    if CASE_PAIR[c] and X ~= nil and H ~= nil then
+                        ch.char = ch.bbox.h >= (X + H) / 2.0 and string.upper(c) or string.lower(c)
+                    end
+                    -- I or l (and a '!' or '|' inside a word): the word's case
+                    local inner_bang = (c == "!" or c == "|") and i < len(w.chars) - 1
+                    if c == "l" or c == "I" or inner_bang then
+                        if n_upper > n_lower then ch.char = "I" elseif n_lower > n_upper then ch.char = "l" end
+                        -- no word starts with l + consonant ("ln", "lm", "lt"): that is I
+                        local nxt = i + 1 < len(w.chars) and w.chars[i + 1].char or ""
+                        if i == 0 and nxt ~= "" and LETTERS[nxt] and not VOWELS[nxt] and nxt ~= "l" and nxt ~= "L" then
+                            ch.char = "I"
+                        end
+                    end
+                end
+            end
+        end
+        local parts = []
+        for _, ch in w.chars do parts[] = ch.char end
+        w.text = string.join(parts, "")
+    end
+    return words
+end
+
+return M

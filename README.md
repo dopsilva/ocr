@@ -21,9 +21,12 @@ Biblioteca de **OCR (Optical Character Recognition)** escrita em **[Sea](https:/
   - Fusão automática de pontos e diacríticos (`i`, `j`, `!`, `?`, `:`, `=`)
   - Divisão de caracteres colados por vale de projeção vertical
   - Agrupamento adaptativo de palavras e cálculo de bounding boxes (`{x, y, w, h}`) em todos os níveis
+- **Português**: letras acentuadas (`á à â ã é ê í ó ô õ ú ç` e maiúsculas, `º ª`) — uma marca acima da letra é lida à parte (ponto, agudo, grave, circunflexo, til, trema) e composta com a letra (`accents.sea`); acentos encostados na letra são reconhecidos pelo protótipo da letra acentuada
+- **Correção por contexto** (`context.sea`), por linha: maiúscula/minúscula de letras de mesmo desenho (`c o s u v w x z`) pela altura comparada à altura-x e à das maiúsculas da linha; em trechos numéricos as letras parecidas viram dígitos (`O→0`, `l/I→1`, `S→5`…) e o inverso em palavras; `I`/`l` pela caixa da palavra; `.`, `-` e `_` pela geometria
 - **Classificador Híbrido (Template Estrutural + Rede Neural MLP com `libs/tensor`)**:
   - Extrator de características de **224 dimensões** (`float_array`): grid normalizado 10×14, projeções horizontais/verticais, perfis de contorno externo, cruzamentos de traço e topologia (furos/Euler + razão de aspecto + posição relativa na linha)
-  - Fonte bitmap 5×7 e glifos TrueType (`DejaVuSansMono` Regular e Bold) embutidos (73 classes: `A-Z`, `a-z`, `0-9` e pontuação)
+  - Fonte bitmap 5×7 e glifos TrueType embutidos: `DejaVuSansMono` Regular e Bold, e em [`glyphs.sea`](glyphs.sea) (gerado por [`tools/gen_glyphs.sea`](tools/gen_glyphs.sea)) DejaVu Sans/Serif/Mono, Liberation Sans/Serif/Mono, Noto Sans/Serif e Ubuntu — 133 classes: `A-Z`, `a-z`, `0-9`, pontuação, `$ % & * # @ ; ' " _` e as letras acentuadas
+  - Acerto por caractere em texto renderizado (11 fontes, 4 tamanhos): ~94% em 24–36 px, ~84% na média de 12 a 36 px, ~80% em fontes que não estão no treino
   - Treinamento neural com `libs/tensor` (`matvec`, `rmsnorm`, `relu`, `softmax`, `adam`) e persistência de modelos em JSON (`save`/`load`)
 
 ## Estrutura dos Módulos
@@ -33,7 +36,10 @@ Biblioteca de **OCR (Optical Character Recognition)** escrita em **[Sea](https:/
 | [`ocr.sea`](ocr.sea) | Ponto de entrada principal (`ocr.read`, `ocr.recognize`, `ocr.new_engine`) |
 | [`libs/image`](../sea_vm/libs/image/image.sea) | (no sea_vm) Decodificação, codificação e manipulação de imagens PNG, BMP, PNM e ASCII; `ocr.image` a expõe |
 | [`preprocess.sea`](preprocess.sea) | Filtros de pré-processamento, binarização Otsu/adaptativa, morfologia e deskew |
-| [`segment.sea`](segment.sea) | Segmentação de linhas, palavras e caracteres com bounding boxes |
+| [`segment.sea`](segment.sea) | Segmentação de linhas, palavras e caracteres com bounding boxes (e as peças de cada caractere) |
+| [`accents.sea`](accents.sea) | Letra + marca (ponto, agudo, grave, circunflexo, til, trema) lidas à parte e compostas |
+| [`context.sea`](context.sea) | Correções por linha: caixa pela altura, dígitos × letras por trecho, `I`/`l`, pontuação pela geometria |
+| [`glyphs.sea`](glyphs.sea) | Glifos pré-rasterizados de 11 fontes, com acentos (gerado por `tools/gen_glyphs.sea`) |
 | [`features.sea`](features.sea) | Extração de vetor de características de 224 dimensões (`float_array`) |
 | [`font.sea`](font.sea) | Fonte bitmap 5×7 embutida, registro de fontes customizadas e renderizador de texto |
 | [`ttf_font.sea`](ttf_font.sea) | Glifos TrueType (`DejaVuSansMono` Regular & Bold) pré-rasterizados em Sea |

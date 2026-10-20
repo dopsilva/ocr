@@ -19,6 +19,8 @@ local segment = require("./segment")
 local features = require("./features")
 local font = require("./font")
 local model = require("./model")
+local context = require("./context")
+local accents = require("./accents")
 
 local M = {}
 
@@ -28,6 +30,39 @@ M.segment = segment
 M.features = features
 M.font = font
 M.model = model
+M.context = context
+M.accents = accents
+
+-- the labels of a model without accents (one byte each), as a whitelist
+local function base_whitelist(mdl)
+    local out = []
+    for _, l in mdl.labels do
+        if len(l) == 1 then out[] = l end
+    end
+    return string.join(out, "")
+end
+
+-- a character: a letter with a mark above it is read as body + mark
+-- (accents.sea); anything else as a whole glyph
+local function classify_char(mdl, img, ch_info, opts)
+    local copts = {mode = opts.mode, whitelist = opts.whitelist, top_k = opts.top_k or 3}
+    if opts.accents ~= false then
+        local body, marks = accents.split(ch_info)
+        if body ~= nil then
+            local bopts = {mode = opts.mode, whitelist = opts.whitelist or base_whitelist(mdl), top_k = copts.top_k}
+            local bpred = mdl:classify(accents.body_info(ch_info, body, img), bopts)?
+            local c = accents.compose(bpred.char, accents.mark_kind(img, marks))
+            if c ~= nil then
+                local out = {}
+                out.char = c
+                out.confidence = bpred.confidence
+                out.candidates = [{char = c, confidence = bpred.confidence}]
+                return out
+            end
+        end
+    end
+    return mdl:classify(ch_info, copts)
+end
 
 local function resolve_image(source)
     if type(source) == "string" then
@@ -72,11 +107,7 @@ function M.recognize(source, opts)
             local word_conf_sum = 0.0
 
             for _, ch_info in word.chars do
-                local pred = mdl:classify(ch_info, {
-                    mode = opts.mode,
-                    whitelist = opts.whitelist,
-                    top_k = opts.top_k or 3,
-                })?
+                local pred = classify_char(mdl, proc_img, ch_info, opts)?
                 local ch_entry = {
                     char = pred.char,
                     confidence = pred.confidence,
@@ -106,6 +137,12 @@ function M.recognize(source, opts)
             word_texts[] = w_text
         end
 
+        -- case, digits against letters, I/l: from the line and the word
+        if opts.context ~= false then
+            context.fix_line(word_entries)
+            word_texts = []
+            for _, w in word_entries do word_texts[] = w.text end
+        end
         local l_text = string.join(word_texts, " ")
         local l_conf = (len(line_chars) > 0) and (line_conf_sum / len(line_chars)) or 0.0
         out_lines[] = {

@@ -185,6 +185,9 @@ local function merge_vertical_components(comps)
             w = comps[i].w,
             h = comps[i].h,
             area = comps[i].area,
+            -- the connected components merged into this character (an accent,
+            -- the dot of an i, the parts of a broken letter)
+            parts = [{x = comps[i].x, y = comps[i].y, w = comps[i].w, h = comps[i].h, area = comps[i].area}],
         }
         used[i] = true
 
@@ -215,6 +218,7 @@ local function merge_vertical_components(comps)
                     cur.w = nx1 - nx0
                     cur.h = ny1 - ny0
                     cur.area += other.area
+                    cur.parts[] = {x = other.x, y = other.y, w = other.w, h = other.h, area = other.area}
                     used[j] = true
                     changed = true
                 end
@@ -263,8 +267,8 @@ local function split_wide_components(img, comps, line_h, thr)
                 local right_x = c.x + best_dx + 1
                 local right_w = c.w - best_dx - 1
                 if left_w >= 2 and right_w >= 2 then
-                    out[] = {x = c.x, y = c.y, w = left_w, h = c.h, area = c.area // 2}
-                    out[] = {x = right_x, y = c.y, w = right_w, h = c.h, area = c.area // 2}
+                    out[] = {x = c.x, y = c.y, w = left_w, h = c.h, area = c.area // 2, parts = nil}
+                    out[] = {x = right_x, y = c.y, w = right_w, h = c.h, area = c.area // 2, parts = nil}
                     continue
                 end
             end
@@ -342,7 +346,9 @@ function M.line_chars(img, line_bbox, opts)
             rel_height = rel_height,
             aspect = aspect,
             line_height = line_h,
+            line_top = line_bbox.y,
             patch = patch,
+            parts = box.parts,
         }
     end
 
@@ -389,8 +395,13 @@ function M.group_words(chars, line_bbox, opts)
     end
     if min_pos_gap < 1 then min_pos_gap = 1 end
 
-    -- Default threshold based on character geometry
-    local space_thr = math.max(min_pos_gap * 2.1, ref_char_w * 0.68)
+    -- Default threshold: a word space is well above the usual gap between
+    -- letters (the median) and about 0.4 of the line height or more
+    local med_gap = math.max(1, list.median(gaps))
+    local heights = []
+    for _, c in chars do heights[] = c.bbox.h end
+    local med_h = list.median(heights)
+    local space_thr = math.max(min_pos_gap * 2.1, med_gap * 2.5, med_h * 0.33)
 
     -- If there is a clear bimodal jump in sorted_gaps (e.g. intra-word gaps vs inter-word spaces),
     -- place the threshold at the midpoint of the largest jump.

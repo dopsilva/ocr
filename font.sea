@@ -747,14 +747,16 @@ function Font.render(self, text, opts)
     local gh = self.height
     local max_line_px = 0
     for _, line in lines do
-        local n_chars = len(line)
+        local line_chars = utf8.valid(line) and utf8.chars(line) or string.split(line, "")
+        local n_chars = len(line_chars)
         local px = 0
         for i = 1, n_chars do
-            local ch = string.sub(line, i, i)
+            local ch = line_chars[i - 1]
             if ch == " " then
                 px += space_width
             else
-                px += gw * scale
+                local rows = self.glyphs[ch]
+                px += (rows and len(rows[0]) or gw) * scale
             end
             if i < n_chars then
                 px += char_spacing
@@ -775,8 +777,8 @@ function Font.render(self, text, opts)
         local line = lines[line_idx]
         local cursor_x = margin
         local cursor_y = margin + line_idx * (gh * scale + line_spacing)
-        for i = 1, len(line) do
-            local ch = string.sub(line, i, i)
+        local line_chars = utf8.valid(line) and utf8.chars(line) or string.split(line, "")
+        for _, ch in line_chars do
             if ch == " " then
                 cursor_x += space_width + char_spacing
             else
@@ -797,7 +799,7 @@ function Font.render(self, text, opts)
                         end
                     end
                 end
-                cursor_x += gw * scale + char_spacing
+                cursor_x += (rows and len(rows[0]) or gw) * scale + char_spacing
             end
         end
     end
