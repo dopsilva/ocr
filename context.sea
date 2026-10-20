@@ -19,13 +19,15 @@ local X_ONLY = set_of("aemnr")
 local TALL_ONLY = set_of("ABDEFGHKLMNPQRTbdfhk")
 local DIGITS = set_of("0123456789")
 local ASCII = set_of("cosuvwxzCOSUVWXZ")
+-- the cedilla is below: the top of a ç is the top of a c
+local CEDILLA = set_of("çÇ")
 local VOWELS = set_of("aeiouyAEIOUYáàâãäéèêëíìîïóòôõöúùûüÁÀÂÃÄÉÈÊËÍÌÎÏÓÒÔÕÖÚÙÛÜ")
 local LETTERS = set_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzáàâãäéèêëíìîïóòôõöúùûüçñÁÀÂÃÄÉÈÊËÍÌÎÏÓÒÔÕÖÚÙÛÜÇÑ")
 
 -- in a word of digits: the digit a letter is mistaken for. `strong` ones are
 -- taken always, the others only when the classifier also offered the digit
 local TO_DIGIT = {O = "0", o = "0", D = "0", Q = "0", l = "1", I = "1", i = "1", j = "1", J = "1",
-    Z = "2", z = "2", S = "5", s = "5", B = "8", G = "6", b = "6", g = "9", q = "9", A = "4"}
+    Z = "2", z = "2", S = "5", s = "5", B = "8", G = "6", b = "6", ["ó"] = "6", g = "9", q = "9", A = "4"}
 local STRONG_DIGIT = set_of("OolI|")
 -- in a word of letters: the letter a digit is mistaken for (upper case form)
 local TO_LETTER = {["0"] = "O", ["1"] = "l", ["5"] = "S", ["8"] = "B", ["2"] = "Z", ["6"] = "G", ["4"] = "A"}
@@ -172,13 +174,17 @@ function M.fix_line(words)
                         -- an accented letter read whole: its mark on top, so
                         -- a small one is about as tall as a capital
                         local thr = (X + H) / 2.0
-                        if ch.body == nil and not ASCII[c] then thr = H * 1.12 end
+                        if ch.body == nil and not ASCII[c] and not CEDILLA[c] then thr = H * 1.12 end
                         ch.char = hgt >= thr and utf8.upper(c) or utf8.lower(c)
                     end
                     -- I or l (and a '!' or '|' inside a word): the word's case
                     local inner_bang = (c == "!" or c == "|") and i < len(w.chars) - 1
                     if c == "l" or c == "I" or inner_bang then
                         if n_upper > n_lower then ch.char = "I" elseif n_lower > n_upper then ch.char = "l" end
+                        -- after a small letter it is small: a capital I
+                        -- inside a word is rare ("HeIIo" is Hello)
+                        local prv = i > 0 and w.chars[i - 1].char or ""
+                        if prv ~= "" and LETTERS[prv] and is_lower(prv) then ch.char = "l" end
                         -- no word starts with l + consonant ("ln", "lm", "lt"): that is I
                         local nxt = i + 1 < len(w.chars) and w.chars[i + 1].char or ""
                         if i == 0 and nxt ~= "" and LETTERS[nxt] and not VOWELS[nxt] and nxt ~= "l" and nxt ~= "L" then

@@ -67,6 +67,8 @@ local function classify_char(mdl, img, ch_info, opts)
 end
 
 local STROKE = {I = true, l = true, ["1"] = true, ["|"] = true, i = true, j = true, J = true, ["!"] = true, ["'"] = true, ["í"] = true, ["ì"] = true, ["î"] = true, ["ï"] = true, ["Í"] = true, ["Ì"] = true, ["Î"] = true, ["Ï"] = true, ["("] = true, [")"] = true, ["/"] = true}
+-- characters narrower than their advance: wide side bearings
+local NARROW = {I = true, l = true, ["1"] = true, i = true, ["|"] = true, ["í"] = true, ["ì"] = true}
 local X_HEIGHT = {m = true, n = true, u = true, w = true, r = true, v = true}
 local STEM = {I = true, l = true, ["1"] = true, ["|"] = true}
 -- what a cut through a letter leaves, never a character of its own
@@ -288,7 +290,6 @@ function M.recognize(source, opts)
         end
         local line_ref_w = math.max(2, len(widths) > 0 and list.median(widths) or 2)
         local word_entries = []
-        local word_texts = []
         local line_chars = []
         local line_conf_sum = 0.0
 
@@ -327,15 +328,46 @@ function M.recognize(source, opts)
                 chars = char_entries,
             }
             word_entries[] = w_entry
-            all_words[] = w_entry
-            word_texts[] = w_text
+        end
+
+        -- a space beside a narrow character (I, l, 1, punctuation) may be
+        -- only its wide side bearings: less what that character lacks of
+        -- the usual width, is the gap still a space?
+        if line.space_thr ~= nil and len(word_entries) > 1 then
+            local merged = [word_entries[0]]
+            for k = 1, len(word_entries) - 1 do
+                local prev = merged[-1]
+                local cur = word_entries[k]
+                local a = prev.chars[-1]
+                local b = cur.chars[0]
+                local gap = b.bbox.x - (a.bbox.x + a.bbox.w)
+                local allowance = 0.0
+                for _, c in [a, b] do
+                    if NARROW[c.char] then allowance += math.max(0.0, (line_ref_w - c.bbox.w) / 3.0) end
+                end
+                if allowance > 0 and gap - allowance <= line.space_thr then
+                    for _, c in cur.chars do prev.chars[] = c end
+                    prev.text ..= cur.text
+                    local x1 = math.max(prev.bbox.x + prev.bbox.w, cur.bbox.x + cur.bbox.w)
+                    local y0 = math.min(prev.bbox.y, cur.bbox.y)
+                    local y1 = math.max(prev.bbox.y + prev.bbox.h, cur.bbox.y + cur.bbox.h)
+                    prev.bbox = {x = prev.bbox.x, y = y0, w = x1 - prev.bbox.x, h = y1 - y0}
+                    local sum = 0.0
+                    for _, c in prev.chars do sum += c.confidence end
+                    prev.confidence = sum / len(prev.chars)
+                else
+                    merged[] = cur
+                end
+            end
+            word_entries = merged
         end
 
         -- case, digits against letters, I/l: from the line and the word
-        if opts.context ~= false then
-            context.fix_line(word_entries)
-            word_texts = []
-            for _, w in word_entries do word_texts[] = w.text end
+        if opts.context ~= false then context.fix_line(word_entries) end
+        local word_texts = []
+        for _, w in word_entries do
+            all_words[] = w
+            word_texts[] = w.text
         end
         local l_text = string.join(word_texts, " ")
         local l_conf = (len(line_chars) > 0) and (line_conf_sum / len(line_chars)) or 0.0

@@ -30,7 +30,7 @@ Biblioteca de **OCR (Optical Character Recognition)** escrita em **[Sea](https:/
   - Cada glifo é gravado com quatro níveis de cobertura e aprendido em três espessuras de traço (fina, normal e grossa; `model.STROKES`): uma fonte um pouco mais leve ou mais pesada que as do treino ainda encontra as suas formas. Várias serifadas no treino ensinam o que uma serifada desconhecida tem em comum com elas
   - Os protótipos do modelo padrão ficam em cache em `~/.cache/sea-ocr/` (ou `$XDG_CACHE_HOME`): a primeira execução leva ~8 s para montá-los, as seguintes ~0,4 s. A chave é o hash dos glifos e das opções, e ao carregar os protótipos da fonte bitmap são refeitos e comparados (uma mudança no código das características refaz o cache, e os caches antigos são apagados). `model.new({cache = false})` não usa o cache
   - A comparação com os protótipos é um produto matriz-vetor (`tensor.matvec`) contra a matriz dos protótipos normalizados, ~17× mais rápida que o cosseno em Sea
-  - Acerto por caractere em texto renderizado (11 fontes, 4 tamanhos, texto em inglês e em português): ~96% em 24–36 px, ~87% em 12 px, ~93% na média (texto do PIL, em inglês e em português), ~85% na serifada mais difícil fora do treino (FreeSerif)
+  - Acerto por caractere em texto renderizado (11 fontes, 4 tamanhos, texto em inglês e em português): ~97% em 24–36 px, ~90% em 12 px, ~95% na média (texto do PIL em inglês; ~94% em português), ~85% na serifada mais difícil fora do treino (FreeSerif)
   - Treinamento neural com `libs/tensor` (`matvec`, `rmsnorm`, `relu`, `softmax`, `adam`) e persistência de modelos em JSON (`save`/`load`)
 
 ## Estrutura dos Módulos

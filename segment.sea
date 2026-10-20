@@ -355,6 +355,7 @@ function M.line_chars(img, line_bbox, opts)
 end
 
 -- Group a sorted list of line characters into words by analyzing inter-character gaps
+-- → words, the gap above which a space was seen (nil for a single character)
 function M.group_words(chars, line_bbox, opts)
     opts = opts or {}
     if len(chars) == 0 then return [] end
@@ -445,7 +446,7 @@ function M.group_words(chars, line_bbox, opts)
         words[] = M.make_word(cur_chars)
     end
 
-    return words
+    return words, space_thr
 end
 
 function M.make_word(char_list)
@@ -473,11 +474,12 @@ function M.page(img, opts)
     for _, line in line_list do
         local chars = M.line_chars(img, line.bbox, opts)
         if len(chars) > 0 then
-            local words = M.group_words(chars, line.bbox, opts)
+            local words, space_thr = M.group_words(chars, line.bbox, opts)
             out_lines[] = {
                 bbox = line.bbox,
                 words = words,
                 chars = chars,
+                space_thr = space_thr,
             }
         end
     end
