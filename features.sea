@@ -1,10 +1,13 @@
 -- features.sea — Feature extraction for OCR character patches.
--- Produces a 224-dimensional float_array combining:
+-- Produces a 384-dimensional float_array combining:
 --   - 10x14 tight normalized zoning grid (140 dims)
 --   - Horizontal & vertical ink projections (24 dims)
 --   - Left & right contour profiles (28 dims)
 --   - Horizontal & vertical stroke transition / crossing counts (24 dims)
 --   - Geometric, topological, and line-relative features (8 dims)
+--   - Stroke directions: gradient orientations in 8 bins over 4x5 zones of
+--     a 16x20 gray copy (160 dims), which bear a stroke a little higher or
+--     thinner than the learned one better than the ink grid does
 
 local preprocess = require("./preprocess")
 
@@ -12,7 +15,17 @@ local M = {}
 
 const GRID_W = 10
 const GRID_H = 14
-const FEAT_DIM = 224
+const BASE_DIM = 224
+const DIR_W = 16
+const DIR_H = 20
+const DIR_CELL = 4
+const DIR_BINS = 8
+const DIR_DIM = (DIR_W // DIR_CELL) * (DIR_H // DIR_CELL) * DIR_BINS
+const FEAT_DIM = BASE_DIM + DIR_DIM
+-- the weight of the direction block against the others (its norm)
+M.DIR_WEIGHT = 8.0
+-- the weight of the hole count (an e has one, a c none)
+const HOLE_W = 2.0
 
 M.GRID_W = GRID_W
 M.GRID_H = GRID_H
@@ -91,7 +104,104 @@ local function count_holes(grid_img, thr)
     return holes
 end
 
--- features.extract(char_info_or_img [, opts]) → float_array(224)
+-- the stroke direction histograms of a trimmed patch, appended to feat:
+-- Sobel gradients of a 16x20 gray copy, each pixel's magnitude shared by
+-- the two nearest of 8 orientations, summed over 4x4 cells (each pixel
+-- shared by the 4 nearest cell centres), L2-normalized and
+-- scaled by M.DIR_WEIGHT
+local function add_directions(feat, trimmed)
+    local g = preprocess.resize(trimmed, DIR_W, DIR_H)
+    local d = g.data
+    local zones_x = DIR_W // DIR_CELL
+    local zones_y = DIR_H // DIR_CELL
+    -- the copy with a white border, so the 3x3 neighbourhood needs no checks
+    local pw = DIR_W + 2
+    local pad = float_array((DIR_W + 2) * (DIR_H + 2))
+    for i = 0, pw * (DIR_H + 2) - 1 do pad[] = 255.0 end
+    for y = 0, DIR_H - 1 do
+        for x = 0, DIR_W - 1 do pad[(y + 1) * pw + x + 1] = d[y * DIR_W + x] * 1.0 end
+    end
+    -- the two zones a column / row shares its votes with (offsets into the
+    -- histogram) and their weights; at the edges the missing one weighs 0
+    local function shares(n, zones, stride)
+        local z0s = int_array(n)
+        local z1s = int_array(n)
+        local w0s = float_array(n)
+        local w1s = float_array(n)
+        for i = 0, n - 1 do
+            local z = (i + 0.5) / DIR_CELL - 0.5
+            local z0 = math.floor(z)
+            local f = z - z0
+            local a = math.max(0, z0)
+            local b = math.min(zones - 1, z0 + 1)
+            z0s[] = a * stride
+            z1s[] = b * stride
+            w0s[] = z0 >= 0 and 1.0 - f or 0.0
+            w1s[] = z0 + 1 < zones and f or 0.0
+        end
+        return z0s, z1s, w0s, w1s
+    end
+    local x0s, x1s, wx0s, wx1s = shares(DIR_W, zones_x, DIR_BINS)
+    local y0s, y1s, wy0s, wy1s = shares(DIR_H, zones_y, zones_x * DIR_BINS)
+    local hist = float_array(DIR_DIM)
+    hist[DIR_DIM - 1] = 0.0
+    local two_pi = 2.0 * math.pi
+    for y = 0, DIR_H - 1 do
+        local ya = y0s[y]
+        local yb = y1s[y]
+        local wya = wy0s[y]
+        local wyb = wy1s[y]
+        local up = y * pw
+        local mid = up + pw
+        local dn = mid + pw
+        for x = 0, DIR_W - 1 do
+            local gx = (pad[up + x + 2] + 2.0 * pad[mid + x + 2] + pad[dn + x + 2]) -
+                (pad[up + x] + 2.0 * pad[mid + x] + pad[dn + x])
+            local gy = (pad[dn + x] + 2.0 * pad[dn + x + 1] + pad[dn + x + 2]) -
+                (pad[up + x] + 2.0 * pad[up + x + 1] + pad[up + x + 2])
+            local mag = math.sqrt(gx * gx + gy * gy)
+            if mag > 1e-6 then
+                local a = math.atan(gy, gx)
+                if a < 0 then a += two_pi end
+                local pos = a / two_pi * DIR_BINS
+                local b0 = math.floor(pos)
+                local f = pos - b0
+                b0 = b0 % DIR_BINS
+                local b1 = (b0 + 1) % DIR_BINS
+                local m0 = mag * (1.0 - f)
+                local m1 = mag * f
+                -- shared by the 4 nearest zone centres: a stroke a little
+                -- higher (the bar of an e) still lands in the same zones
+                local xa = x0s[x]
+                local xb = x1s[x]
+                local wxa = wx0s[x]
+                local wxb = wx1s[x]
+                local base = ya + xa
+                local wt = wya * wxa
+                hist[base + b0] += m0 * wt
+                hist[base + b1] += m1 * wt
+                base = ya + xb
+                wt = wya * wxb
+                hist[base + b0] += m0 * wt
+                hist[base + b1] += m1 * wt
+                base = yb + xa
+                wt = wyb * wxa
+                hist[base + b0] += m0 * wt
+                hist[base + b1] += m1 * wt
+                base = yb + xb
+                wt = wyb * wxb
+                hist[base + b0] += m0 * wt
+                hist[base + b1] += m1 * wt
+            end
+        end
+    end
+    local norm = 0.0
+    for i = 0, DIR_DIM - 1 do norm += hist[i] * hist[i] end
+    local k = norm > 1e-12 and M.DIR_WEIGHT / math.sqrt(norm) or 0.0
+    for i = 0, DIR_DIM - 1 do feat[] = hist[i] * k end
+end
+
+-- features.extract(char_info_or_img [, opts]) → float_array(FEAT_DIM)
 -- Accepts either a segmented char descriptor `{ patch, bbox, rel_top, rel_bottom, rel_height, aspect }`
 -- or a raw `Image` object.
 function M.extract(item, opts)
@@ -219,8 +329,9 @@ function M.extract(item, opts)
     feat[] = rel_height * 2.5
     feat[] = (top_ink - bot_ink) / ink_norm * 1.5
     feat[] = (left_ink - right_ink) / ink_norm * 1.5
-    feat[] = (holes * 1.2) + (center_ink / 24.0) * 0.5
+    feat[] = (holes * HOLE_W) + (center_ink / 24.0) * 0.5
 
+    add_directions(feat, trimmed)
     return feat
 end
 

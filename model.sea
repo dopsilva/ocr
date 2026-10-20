@@ -631,6 +631,15 @@ function Cache.save(self, cache)
     if is_error(tensor.save(tmp, all)) then return end
     if is_error(fs.rename(tmp, cache.feats)) then return end
     fs.write(cache.labels, string.join(labels, "\n") .. "\n", {atomic = true})
+    -- the caches of other glyphs or code are stale: remove them
+    local names = fs.list(cache.dir)
+    if is_error(names) then return end
+    for _, name in names do
+        local p = path.join(cache.dir, name)
+        local stale = (string.ends_with(name, ".f64") or string.ends_with(name, ".labels"))
+            and p ~= cache.feats and p ~= cache.labels
+        if stale then fs.remove(p) end
+    end
 end
 
 -- model.load(file_path) → Model|error
