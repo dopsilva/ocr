@@ -155,6 +155,19 @@ t.describe("neural MLP training (libs/tensor) and custom fonts", function()
         t.eq(res_hyb.text, "TENSOR MLP 987")
     end)
 
+    t.it("learns a TrueType font with register_ttf", function()
+        local eng = ocr.new_engine()
+        t.ok(is_error(eng:register_ttf("/no/such/font.ttf")))
+        local path_ = "/usr/share/fonts/truetype/freefont/FreeSerif.ttf"
+        if not fs.exists(path_) then return end
+        local before = len(eng.model.samples)
+        t.no_error(eng:register_ttf(path_))
+        t.eq(len(eng.model.samples) - before, 133 * len(ocr.model.STROKES))
+        local truetype = require("../sea_vm/libs/truetype/truetype")
+        local img = t.no_error(truetype.load(path_)):render("Serif text 2026", 28, {pad = 12})
+        t.eq(t.no_error(eng:read(img)), "Serif text 2026")
+    end)
+
     t.it("supports registering custom glyphs and saving/loading models", function()
         local custom_font = ocr.font.new({}, 5, 7)
         custom_font:set_glyph("X", [

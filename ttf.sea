@@ -1,0 +1,59 @@
+-- ttf.sea — glyphs of a TrueType font for the recognizer, drawn by
+-- libs/truetype (pure Sea): what tools/gen_glyphs.sea writes into glyphs.sea
+-- and what engine:register_ttf learns at run time. Each glyph is a cell as
+-- tall as the font's line (ascender to descender, the baseline at the same
+-- row) and as wide as its advance plus 2 pixels each side. A pixel is one of
+-- four levels of anti-aliased coverage: "#" 3/4 or more, "+" 1/2, "-" 1/4,
+-- "." less, so the model can take the glyph thin ("#"), normal ("#+") or
+-- bold ("#+-").
+
+local truetype = require("../sea_vm/libs/truetype/truetype")
+local image = require("../sea_vm/libs/image/image")
+
+local M = {}
+
+-- the size glyphs are drawn at, in pixels (the em)
+M.SIZE = 22
+
+-- the characters learned: ASCII letters, digits and punctuation, and the
+-- Portuguese accented letters
+M.CHARS = "!()+,-./0123456789:=?ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz" ..
+    "$%&*#@;'\"_" .. "áàâãäéèêëíìîïóòôõöúùûüçñÁÀÂÃÄÉÈÊËÍÌÎÏÓÒÔÕÖÚÙÛÜÇÑºª"
+
+-- ttf.glyph_rows(font, ch [, size]) → the rows of one glyph
+function M.glyph_rows(font, ch, size)
+    size = size or M.SIZE
+    local m = font:metrics(size)
+    local w = math.max(1, math.round(font:text_width(ch, size)))
+    local img = image.new(w + 4, m.height, 255)
+    font:draw(img, ch, 2, m.ascent, size)
+    local rows = []
+    for y = 0, img.height - 1 do
+        local row = []
+        for x = 0, img.width - 1 do
+            local v = img.data[y * img.width + x]
+            row[] = v < 64 and "#" or (v < 128 and "+" or (v < 192 and "-" or "."))
+        end
+        rows[] = string.join(row, "")
+    end
+    return rows
+end
+
+-- ttf.glyphs(font_or_path [, opts]) → {height, glyphs = {[char] = rows}}|error
+-- opts: size (default ttf.SIZE), chars (a string, default ttf.CHARS).
+-- Characters the font does not have are left out.
+function M.glyphs(source, opts)
+    opts = opts or {}
+    local font = source
+    if type(source) == "string" then font = truetype.load(source)? end
+    local size = opts.size or M.SIZE
+    local out = {}
+    out.height = font:metrics(size).height
+    out.glyphs = {}
+    for _, ch in utf8.chars(opts.chars or M.CHARS) do
+        if font:glyph_index(utf8.codepoint(ch)) ~= 0 then out.glyphs[ch] = M.glyph_rows(font, ch, size) end
+    end
+    return out
+end
+
+return M

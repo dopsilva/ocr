@@ -8,6 +8,7 @@ local features = require("./features")
 local font = require("./font")
 local ttf_font = require("./ttf_font")
 local glyphs = require("./glyphs")
+local ttf = require("./ttf")
 local preprocess = require("./preprocess")
 
 local M = {}
@@ -100,6 +101,7 @@ function Model.add_feature(self, label, feat_vec)
     return self
 end
 
+
 -- the prototypes as unit-length columns (w[i * n + j] = feature i of sample
 -- j), made again when samples were added
 local function prototype_matrix(self)
@@ -153,6 +155,19 @@ function Model.register_font(self, font_obj, opts)
                 self:add_sample(ch, desc_bold)
             end
         end
+    end
+    return self
+end
+
+-- model:register_ttf(font_or_path [, opts]) → self|error: learns the glyphs
+-- of a TrueType font (a path or a libs/truetype font), drawn by ttf.sea, in
+-- each stroke of M.STROKES. opts: strokes, chars (a string, default
+-- ttf.CHARS), size (default ttf.SIZE)
+function Model.register_ttf(self, source, opts)
+    opts = opts or {}
+    local g = ttf.glyphs(source, {chars = opts.chars, size = opts.size})?
+    for _, levels in opts.strokes or M.STROKES do
+        self:register_font(font.new(stroke(g.glyphs, levels), g.height // 2, g.height), {scales = [1], include_bold = false})
     end
     return self
 end

@@ -43,6 +43,7 @@ Biblioteca de **OCR (Optical Character Recognition)** escrita em **[Sea](https:/
 | [`segment.sea`](segment.sea) | Segmentação de linhas, palavras e caracteres com bounding boxes (e as peças de cada caractere) |
 | [`accents.sea`](accents.sea) | Letra + marca (ponto, agudo, grave, circunflexo, til, trema) lidas à parte e compostas |
 | [`context.sea`](context.sea) | Correções por linha: caixa pela altura, dígitos × letras por trecho, `I`/`l`, pontuação pela geometria |
+| [`ttf.sea`](ttf.sea) | Glifos de uma fonte TrueType para o modelo (usado por `tools/gen_glyphs.sea` e `register_ttf`) |
 | [`glyphs.sea`](glyphs.sea) | Glifos pré-rasterizados de 17 faces, com acentos e quatro níveis de cobertura (gerado por `tools/gen_glyphs.sea`) |
 | [`features.sea`](features.sea) | Extração de vetor de características de 224 dimensões (`float_array`) |
 | [`font.sea`](font.sea) | Fonte bitmap 5×7 embutida, registro de fontes customizadas e renderizador de texto |
@@ -82,6 +83,12 @@ local eng = ocr.new_engine()
 eng:train({epochs = 30, lr = 0.015})?
 print(eng:read("examples/hello_sea.png", {mode = "hybrid"})?)
 eng:save_model("modelo_ocr.json")?
+
+-- 5. A fonte dos documentos que serão lidos: o engine aprende os glifos dela
+-- (desenhados por ttf.sea / libs/truetype, nas três espessuras de traço)
+local recibos = ocr.new_engine()
+recibos:register_ttf("/usr/share/fonts/truetype/freefont/FreeSerif.ttf")?
+print(recibos:read("examples/recibo.png")?)
 ```
 
 ## Executando os Testes e Exemplos

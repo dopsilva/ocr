@@ -65,6 +65,8 @@ local function classify_char(mdl, img, ch_info, opts)
 end
 
 local STROKE = {I = true, l = true, ["1"] = true, ["|"] = true, i = true, j = true, J = true, ["!"] = true, ["'"] = true, ["í"] = true, ["ì"] = true, ["î"] = true, ["ï"] = true, ["Í"] = true, ["Ì"] = true, ["Î"] = true, ["Ï"] = true, ["("] = true, [")"] = true, ["/"] = true}
+local X_HEIGHT = {m = true, n = true, u = true, w = true, r = true, v = true}
+local STEM = {I = true, l = true, ["1"] = true, ["|"] = true}
 local DIGIT = {["0"] = true, ["1"] = true, ["2"] = true, ["3"] = true, ["4"] = true, ["5"] = true, ["6"] = true, ["7"] = true, ["8"] = true, ["9"] = true}
 
 -- a wide character read with little confidence may be two touching ones
@@ -95,6 +97,7 @@ local function read_char(mdl, img, ch_info, opts, depth)
         if len(cuts) >= 4 then break end
         if not list.contains(cuts, cols[i][0]) then cuts[] = cols[i][0] end
     end
+    local implausible = X_HEIGHT[pred.char] and b.h > ch_info.line_height * 0.62
     local best = nil
     local best_score = pred.confidence + 0.04
     for _, dx in cuts do
@@ -104,9 +107,14 @@ local function read_char(mdl, img, ch_info, opts, depth)
         local rp = classify_char(mdl, img, right, opts)?
         local score = math.min(lp.confidence, rp.confidence)
         -- a lone stroke is what any cut of m, n, u or w leaves: no half may
-        -- be one, but for a 1 beside a digit ("10")
-        local ok = not (STROKE[lp.char] and not (lp.char == "1" and DIGIT[rp.char]))
-            and not (STROKE[rp.char] and not (rp.char == "1" and DIGIT[lp.char]))
+        -- be one, but for a 1 beside a digit ("10"), or when the piece is too
+        -- tall for the x-height letter it was read as ("IN" read as m)
+        local function allowed(c, other)
+            if not STROKE[c] then return true end
+            if c == "1" and DIGIT[other] then return true end
+            return implausible and STEM[c] == true
+        end
+        local ok = allowed(lp.char, rp.char) and allowed(rp.char, lp.char)
         if ok and score > best_score then
             best_score = score
             best = [left, right]
@@ -292,6 +300,13 @@ end
 
 function Engine.register_font(self, font_obj, opts)
     self.model:register_font(font_obj, opts)
+    return self
+end
+
+-- engine:register_ttf(font_or_path [, opts]) → engine|error: the engine also
+-- learns this TrueType font (the font of the documents it will read)
+function Engine.register_ttf(self, source, opts)
+    self.model:register_ttf(source, opts)?
     return self
 end
 
