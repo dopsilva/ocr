@@ -1,0 +1,197 @@
+-- ocr.sea — Pure Sea OCR Library (with `libs/tensor` neural acceleration).
+--
+-- High-level API:
+--   ocr.read(source [, opts])      → string|error
+--   ocr.recognize(source [, opts]) → { text, confidence, lines, words, chars }|error
+--   ocr.new_engine([opts])         → Engine instance
+--
+-- Submodules:
+--   ocr.image       — PNG, BMP, PGM/PPM/PBM, ASCII image loading & saving
+--   ocr.preprocess  — Grayscale, auto-invert, Otsu & adaptive binarize, denoise, morph, deskew, crop, resize
+--   ocr.segment     — Line, word, and character segmentation with bounding boxes
+--   ocr.features    — 224-dim structural, contour, projection & topological feature extractor
+--   ocr.font        — Built-in 5x7 font, custom font builder, and text-to-image renderer
+--   ocr.model       — Template + Tensor MLP classifier, custom training & persistence
+
+local image = require("./image")
+local preprocess = require("./preprocess")
+local segment = require("./segment")
+local features = require("./features")
+local font = require("./font")
+local model = require("./model")
+
+local M = {}
+
+M.image = image
+M.preprocess = preprocess
+M.segment = segment
+M.features = features
+M.font = font
+M.model = model
+
+local function resolve_image(source)
+    if type(source) == "string" then
+        return image.load(source)
+    elseif type(source) == "table" and source.width and source.height and source.data then
+        return source
+    end
+    return error("ocr: expected file path (string) or Image object")
+end
+
+-- ocr.recognize(source [, opts]) → { text, confidence, lines, words, chars, preprocessed }|error
+function M.recognize(source, opts)
+    opts = opts or {}
+    local raw_img = resolve_image(source)?
+    local proc_img = raw_img
+    if opts.preprocess ~= false then
+        proc_img = preprocess.run(raw_img, opts.preprocess_opts or opts)
+    end
+
+    local mdl = opts.model or model.builtin()
+    if opts.mode == "mlp" and not mdl.mlp_trained then
+        mdl:train(opts.train_opts)
+    end
+
+    local page = segment.page(proc_img, opts.segment_opts or opts)
+    local out_lines = []
+    local all_words = []
+    local all_chars = []
+    local line_texts = []
+    local total_conf_sum = 0.0
+    local total_char_count = 0
+
+    for _, line in page.lines do
+        local word_entries = []
+        local word_texts = []
+        local line_chars = []
+        local line_conf_sum = 0.0
+
+        for _, word in line.words do
+            local char_entries = []
+            local char_strs = []
+            local word_conf_sum = 0.0
+
+            for _, ch_info in word.chars do
+                local pred = mdl:classify(ch_info, {
+                    mode = opts.mode,
+                    whitelist = opts.whitelist,
+                    top_k = opts.top_k or 3,
+                })?
+                local ch_entry = {
+                    char = pred.char,
+                    confidence = pred.confidence,
+                    bbox = ch_info.bbox,
+                    candidates = pred.candidates,
+                }
+                char_entries[] = ch_entry
+                line_chars[] = ch_entry
+                all_chars[] = ch_entry
+                char_strs[] = pred.char
+                word_conf_sum += pred.confidence
+                line_conf_sum += pred.confidence
+                total_conf_sum += pred.confidence
+                total_char_count += 1
+            end
+
+            local w_text = string.join(char_strs, "")
+            local w_conf = (len(char_entries) > 0) and (word_conf_sum / len(char_entries)) or 0.0
+            local w_entry = {
+                text = w_text,
+                confidence = w_conf,
+                bbox = word.bbox,
+                chars = char_entries,
+            }
+            word_entries[] = w_entry
+            all_words[] = w_entry
+            word_texts[] = w_text
+        end
+
+        local l_text = string.join(word_texts, " ")
+        local l_conf = (len(line_chars) > 0) and (line_conf_sum / len(line_chars)) or 0.0
+        out_lines[] = {
+            text = l_text,
+            confidence = l_conf,
+            bbox = line.bbox,
+            words = word_entries,
+            chars = line_chars,
+        }
+        line_texts[] = l_text
+    end
+
+    local full_text = string.join(line_texts, "\n")
+    local overall_conf = (total_char_count > 0) and (total_conf_sum / total_char_count) or 0.0
+
+    return {
+        text = full_text,
+        confidence = overall_conf,
+        lines = out_lines,
+        words = all_words,
+        chars = all_chars,
+        preprocessed = proc_img,
+    }
+end
+
+-- ocr.read(source [, opts]) → string|error
+function M.read(source, opts)
+    local res = M.recognize(source, opts)?
+    return res.text
+end
+
+-- Engine object for stateful OCR configuration, custom fonts, and training
+local Engine = {}
+
+function Engine.read(self, source, opts)
+    local merged = {}
+    for k, v in self.opts do merged[k] = v end
+    if opts then
+        for k, v in opts do merged[k] = v end
+    end
+    merged.model = self.model
+    return M.read(source, merged)
+end
+
+function Engine.recognize(self, source, opts)
+    local merged = {}
+    for k, v in self.opts do merged[k] = v end
+    if opts then
+        for k, v in opts do merged[k] = v end
+    end
+    merged.model = self.model
+    return M.recognize(source, merged)
+end
+
+function Engine.register_font(self, font_obj, opts)
+    self.model:register_font(font_obj, opts)
+    return self
+end
+
+function Engine.add_sample(self, label, img_or_ascii, opts)
+    local img = img_or_ascii
+    if type(img_or_ascii) == "string" then
+        img = image.from_ascii(img_or_ascii, opts)
+    end
+    self.model:add_sample(label, img, opts)
+    return self
+end
+
+function Engine.train(self, opts)
+    return self.model:train(opts)
+end
+
+function Engine.save_model(self, file_path)
+    return self.model:save(file_path)
+end
+
+-- ocr.new_engine([opts]) → Engine
+function M.new_engine(opts)
+    opts = opts or {}
+    local eng = {}
+    eng.opts = opts
+    eng.model = opts.model or model.new(opts)
+    for name, fn in Engine do
+        eng[name] = fn
+    end
+    return eng
+end
+
+return M

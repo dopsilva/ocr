@@ -1,0 +1,41 @@
+-- examples/demo.sea — End-to-end demonstration of the Sea OCR library.
+-- Run with: ~/projects/sea_vm/bin/sea examples/demo.sea
+
+local ocr = require("../ocr")
+
+print("=== 1. Extracao simples de texto (ocr.read) ===")
+local sample_img = ocr.font.render("Sea OCR 2026\n100 + 250 = 350", {scale = 3})
+print("Texto reconhecido:")
+print(ocr.read(sample_img)?)
+print()
+
+print("=== 2. Deteccao detalhada (linhas, palavras, caracteres, bboxes e confianca) ===")
+local detail = ocr.recognize(sample_img)?
+printf("Confianca geral: %.2f%%\n", detail.confidence * 100)
+for li, line in detail.lines do
+    printf("  Linha %d: \"%s\" (bbox: x=%d y=%d w=%d h=%d, conf=%.2f%%)\n",
+        li, line.text, line.bbox.x, line.bbox.y, line.bbox.w, line.bbox.h, line.confidence * 100)
+    for wi, word in line.words do
+        printf("    Palavra %d: \"%s\" (bbox: x=%d y=%d w=%d h=%d, chars=%d, conf=%.2f%%)\n",
+            wi, word.text, word.bbox.x, word.bbox.y, word.bbox.w, word.bbox.h, len(word.chars), word.confidence * 100)
+    end
+end
+print()
+
+print("=== 3. Pipeline de pre-processamento (fundo escuro + ruido + inclinacao) ===")
+local noisy = ocr.font.render("CLEAN ME 42", {scale = 3, fg = 240, bg = 15, margin = 16})
+local tilted = ocr.preprocess.rotate(noisy, 4.0)
+local inverted = ocr.preprocess.auto_invert(tilted)
+local binarized = ocr.preprocess.binarize(inverted)
+local denoised = ocr.preprocess.denoise(binarized, {method = "speckle"})
+local deskewed, angle = ocr.preprocess.deskew(denoised)
+printf("Angulo de inclinacao estimado: %.1f graus -> Texto: \"%s\"\n\n", angle, ocr.read(deskewed)?)
+
+print("=== 4. Treinamento Neural MLP com libs/tensor e fonte customizada ===")
+local eng = ocr.new_engine()
+local stats = eng:train({epochs = 30, lr = 0.015})?
+printf("MLP treinado em %d classes (%d amostras): loss=%.4f, accuracy=%.2f%%\n",
+    stats.num_classes, stats.num_samples, stats.loss, stats.accuracy * 100)
+local test_img = ocr.font.render("NEURAL OCR OK!", {scale = 2})
+printf("Resultado (modo hybrid): \"%s\"\n", eng:read(test_img, {mode = "hybrid"})?)
+printf("Resultado (modo mlp):    \"%s\"\n", eng:read(test_img, {mode = "mlp"})?)

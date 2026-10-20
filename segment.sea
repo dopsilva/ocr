@@ -1,0 +1,473 @@
+-- segment.sea — Hierarchical document layout segmentation (Lines → Words → Characters)
+-- with connected-component analysis, diacritic/dot merging (i, j, !, ?, :, =),
+-- touching-character valley splitting, and adaptive word-gap clustering.
+
+local preprocess = require("./preprocess")
+
+local M = {}
+
+-- segment.lines(img [, opts]) → array of line descriptors:
+--   { bbox = {x, y, w, h}, y0, y1 }
+function M.lines(img, opts)
+    opts = opts or {}
+    local thr = opts.threshold or 128
+    local min_row_ink = opts.min_row_ink or 1
+    local min_line_h = opts.min_line_height or 2
+    local w = img.width
+    local h = img.height
+
+    local row_ink = int_array(h)
+    for y = 0, h - 1 do
+        local cnt = 0
+        local base = y * w
+        for x = 0, w - 1 do
+            if img.data[base + x] < thr then
+                cnt += 1
+            end
+        end
+        row_ink[] = cnt
+    end
+
+    local raw_bands = []
+    local in_band = false
+    local start_y = 0
+    for y = 0, h - 1 do
+        if row_ink[y] >= min_row_ink then
+            if not in_band then
+                in_band = true
+                start_y = y
+            end
+        else
+            if in_band then
+                in_band = false
+                raw_bands[] = {y0 = start_y, y1 = y - 1}
+            end
+        end
+    end
+    if in_band then
+        raw_bands[] = {y0 = start_y, y1 = h - 1}
+    end
+
+    -- Merge very thin horizontal bands (like a row of dots above 'i'/'j') into the nearest line band
+    -- when the vertical gap is small (<= 25% of the adjacent band height).
+    local merged_bands = []
+    for i = 0, len(raw_bands) - 1 do
+        local b = raw_bands[i]
+        local bh = b.y1 - b.y0 + 1
+        if len(merged_bands) > 0 then
+            local prev = merged_bands[-1]
+            local prev_h = prev.y1 - prev.y0 + 1
+            local gap = b.y0 - prev.y1 - 1
+            local max_h = math.max(bh, prev_h)
+            local min_h = math.min(bh, prev_h)
+            if gap <= math.max(2, max_h // 3) and min_h <= max_h // 2 then
+                prev.y1 = b.y1
+                continue
+            end
+        end
+        merged_bands[] = {y0 = b.y0, y1 = b.y1}
+    end
+
+    local lines = []
+    for _, b in merged_bands do
+        local bh = b.y1 - b.y0 + 1
+        if bh >= min_line_h then
+            local min_x = w
+            local max_x = -1
+            for y = b.y0, b.y1 do
+                local base = y * w
+                for x = 0, w - 1 do
+                    if img.data[base + x] < thr then
+                        if x < min_x then min_x = x end
+                        if x > max_x then max_x = x end
+                    end
+                end
+            end
+            if max_x >= min_x then
+                lines[] = {
+                    bbox = {x = min_x, y = b.y0, w = max_x - min_x + 1, h = bh},
+                    y0 = b.y0,
+                    y1 = b.y1,
+                }
+            end
+        end
+    end
+
+    return lines
+end
+
+-- Connected components labeling (8-connectivity) inside a rectangular region.
+local function connected_components(img, rx, ry, rw, rh, thr)
+    local visited = int_array(rw * rh)
+    for i = 0, rw * rh - 1 do visited[] = 0 end
+    local comps = []
+    local qx = int_array(rw * rh)
+    local qy = int_array(rw * rh)
+    for i = 0, rw * rh - 1 do
+        qx[] = 0
+        qy[] = 0
+    end
+
+    local w = img.width
+    for ly = 0, rh - 1 do
+        for lx = 0, rw - 1 do
+            local idx = ly * rw + lx
+            if visited[idx] == 0 and img.data[(ry + ly) * w + (rx + lx)] < thr then
+                visited[idx] = 1
+                local head = 0
+                local tail = 0
+                qx[tail] = lx
+                qy[tail] = ly
+                tail += 1
+
+                local min_x = lx
+                local max_x = lx
+                local min_y = ly
+                local max_y = ly
+                local area = 0
+
+                while head < tail do
+                    local cx = qx[head]
+                    local cy = qy[head]
+                    head += 1
+                    area += 1
+                    if cx < min_x then min_x = cx end
+                    if cx > max_x then max_x = cx end
+                    if cy < min_y then min_y = cy end
+                    if cy > max_y then max_y = cy end
+
+                    for oy = 0, 2 do
+                        local ny = cy + oy - 1
+                        if ny >= 0 and ny < rh then
+                            for ox = 0, 2 do
+                                local nx = cx + ox - 1
+                                if nx >= 0 and nx < rw then
+                                    local nidx = ny * rw + nx
+                                    if visited[nidx] == 0 and img.data[(ry + ny) * w + (rx + nx)] < thr then
+                                        visited[nidx] = 1
+                                        qx[tail] = nx
+                                        qy[tail] = ny
+                                        tail += 1
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+
+                comps[] = {
+                    x = rx + min_x,
+                    y = ry + min_y,
+                    w = max_x - min_x + 1,
+                    h = max_y - min_y + 1,
+                    area = area,
+                }
+            end
+        end
+    end
+
+    return comps
+end
+
+-- Merge vertically stacked components that belong to the same glyph (e.g. 'i', 'j', '!', '?', ':', '=')
+local function merge_vertical_components(comps)
+    if len(comps) <= 1 then return comps end
+    sort.by(comps, "x")
+    local merged = []
+    local used = []
+    for _ = 0, len(comps) - 1 do used[] = false end
+
+    for i = 0, len(comps) - 1 do
+        if used[i] then continue end
+        local cur = {
+            x = comps[i].x,
+            y = comps[i].y,
+            w = comps[i].w,
+            h = comps[i].h,
+            area = comps[i].area,
+        }
+        used[i] = true
+
+        local changed = true
+        while changed do
+            changed = false
+            for j = 0, len(comps) - 1 do
+                if used[j] then continue end
+                local other = comps[j]
+                local ox0 = math.max(cur.x, other.x)
+                local ox1 = math.min(cur.x + cur.w, other.x + other.w)
+                local overlap = ox1 - ox0
+                local min_w = math.min(cur.w, other.w)
+                local cur_cx = cur.x + cur.w / 2.0
+                local other_cx = other.x + other.w / 2.0
+                local center_dist = math.abs(cur_cx - other_cx)
+                local max_w = math.max(cur.w, other.w)
+
+                -- Merge if horizontally overlapping >= 40% of the narrower component
+                -- or if horizontally aligned within half the wider component's width
+                if overlap >= math.max(1, math.floor(min_w * 0.4)) or center_dist <= max_w * 0.45 then
+                    local nx0 = math.min(cur.x, other.x)
+                    local ny0 = math.min(cur.y, other.y)
+                    local nx1 = math.max(cur.x + cur.w, other.x + other.w)
+                    local ny1 = math.max(cur.y + cur.h, other.y + other.h)
+                    cur.x = nx0
+                    cur.y = ny0
+                    cur.w = nx1 - nx0
+                    cur.h = ny1 - ny0
+                    cur.area += other.area
+                    used[j] = true
+                    changed = true
+                end
+            end
+        end
+        merged[] = cur
+    end
+
+    sort.by(merged, "x")
+    return merged
+end
+
+-- Split overly wide touching-character components using vertical projection valleys
+local function split_wide_components(img, comps, line_h, thr)
+    if len(comps) == 0 then return comps end
+    local widths = []
+    for _, c in comps do widths[] = c.w end
+    local ref_w = list.median(widths)
+    if ref_w < line_h * 0.4 then
+        ref_w = line_h * 0.65
+    end
+
+    local out = []
+    local img_w = img.width
+    for _, c in comps do
+        if c.w > ref_w * 1.75 and c.w >= 6 then
+            -- Find vertical projection inside c's middle [25%..75%]
+            local start_dx = math.max(2, math.floor(c.w * 0.25))
+            local end_dx = math.min(c.w - 3, math.floor(c.w * 0.75))
+            local best_dx = -1
+            local min_col_ink = c.h + 1
+            for dx = start_dx, end_dx do
+                local col_ink = 0
+                for dy = 0, c.h - 1 do
+                    if img.data[(c.y + dy) * img_w + (c.x + dx)] < thr then
+                        col_ink += 1
+                    end
+                end
+                if col_ink < min_col_ink then
+                    min_col_ink = col_ink
+                    best_dx = dx
+                end
+            end
+            if best_dx > 0 and min_col_ink <= math.max(1, c.h // 5) then
+                local left_w = best_dx
+                local right_x = c.x + best_dx + 1
+                local right_w = c.w - best_dx - 1
+                if left_w >= 2 and right_w >= 2 then
+                    out[] = {x = c.x, y = c.y, w = left_w, h = c.h, area = c.area // 2}
+                    out[] = {x = right_x, y = c.y, w = right_w, h = c.h, area = c.area // 2}
+                    continue
+                end
+            end
+        end
+        out[] = c
+    end
+    return out
+end
+
+-- Tighten vertical & horizontal bounds of a box around ink pixels
+local function tighten_box(img, box, thr)
+    local w = img.width
+    local min_x = box.x + box.w
+    local max_x = box.x - 1
+    local min_y = box.y + box.h
+    local max_y = box.y - 1
+
+    for y = box.y, box.y + box.h - 1 do
+        local base = y * w
+        for x = box.x, box.x + box.w - 1 do
+            if img.data[base + x] < thr then
+                if x < min_x then min_x = x end
+                if x > max_x then max_x = x end
+                if y < min_y then min_y = y end
+                if y > max_y then max_y = y end
+            end
+        end
+    end
+
+    if max_x < min_x then
+        return box
+    end
+    return {
+        x = min_x,
+        y = min_y,
+        w = max_x - min_x + 1,
+        h = max_y - min_y + 1,
+        area = box.area,
+    }
+end
+
+-- segment.line_chars(img, line_bbox [, opts]) → array of character descriptors
+function M.line_chars(img, line_bbox, opts)
+    opts = opts or {}
+    local thr = opts.threshold or 128
+    local min_area = opts.min_area or 1
+
+    local raw_comps = connected_components(img, line_bbox.x, line_bbox.y, line_bbox.w, line_bbox.h, thr)
+    local filtered = []
+    for _, c in raw_comps do
+        if c.area >= min_area then
+            filtered[] = c
+        end
+    end
+
+    local merged = merge_vertical_components(filtered)
+    if opts.split_touching ~= false then
+        merged = split_wide_components(img, merged, line_bbox.h, thr)
+    end
+    sort.by(merged, "x")
+
+    local line_h = math.max(1, line_bbox.h)
+    local chars = []
+    for _, box in merged do
+        local tight = tighten_box(img, box, thr)
+        local patch = preprocess.crop(img, tight.x, tight.y, tight.w, tight.h)
+        local rel_top = (tight.y - line_bbox.y) / (line_h * 1.0)
+        local rel_bottom = (tight.y + tight.h - line_bbox.y) / (line_h * 1.0)
+        local rel_height = tight.h / (line_h * 1.0)
+        local aspect = tight.w / (math.max(1, tight.h) * 1.0)
+        chars[] = {
+            bbox = {x = tight.x, y = tight.y, w = tight.w, h = tight.h},
+            rel_top = rel_top,
+            rel_bottom = rel_bottom,
+            rel_height = rel_height,
+            aspect = aspect,
+            line_height = line_h,
+            patch = patch,
+        }
+    end
+
+    return chars
+end
+
+-- Group a sorted list of line characters into words by analyzing inter-character gaps
+function M.group_words(chars, line_bbox, opts)
+    opts = opts or {}
+    if len(chars) == 0 then return [] end
+    if len(chars) == 1 then
+        local c = chars[0]
+        return [
+            {
+                bbox = {x = c.bbox.x, y = c.bbox.y, w = c.bbox.w, h = c.bbox.h},
+                chars = [c],
+            },
+        ]
+    end
+
+    -- Calculate character widths and inter-character edge-to-edge gaps
+    local widths = []
+    for _, c in chars do widths[] = c.bbox.w end
+    local med_w = list.median(widths)
+    local line_h = math.max(1, line_bbox.h)
+    local ref_char_w = math.max(med_w, line_h * 0.55)
+
+    local gaps = []
+    for i = 1, len(chars) - 1 do
+        local prev = chars[i - 1].bbox
+        local cur = chars[i].bbox
+        local g = cur.x - (prev.x + prev.w)
+        gaps[] = g
+    end
+
+    -- Determine adaptive word-space gap threshold
+    local sorted_gaps = sort.sorted(gaps)
+    local min_pos_gap = sorted_gaps[0]
+    for _, g in sorted_gaps do
+        if g > 0 then
+            min_pos_gap = g
+            break
+        end
+    end
+    if min_pos_gap < 1 then min_pos_gap = 1 end
+
+    -- Default threshold based on character geometry
+    local space_thr = math.max(min_pos_gap * 2.1, ref_char_w * 0.68)
+
+    -- If there is a clear bimodal jump in sorted_gaps (e.g. intra-word gaps vs inter-word spaces),
+    -- place the threshold at the midpoint of the largest jump.
+    local max_gap = sorted_gaps[-1]
+    if max_gap >= min_pos_gap * 1.8 and max_gap >= ref_char_w * 0.5 then
+        local best_jump = 0
+        local jump_thr = space_thr
+        for i = 1, len(sorted_gaps) - 1 do
+            local g0 = sorted_gaps[i - 1]
+            local g1 = sorted_gaps[i]
+            local jump = g1 - g0
+            if g0 <= ref_char_w * 0.9 and g1 >= ref_char_w * 0.55 and jump > best_jump then
+                best_jump = jump
+                jump_thr = (g0 + g1) / 2.0
+            end
+        end
+        if best_jump >= math.max(2, min_pos_gap * 0.75) then
+            space_thr = jump_thr
+        end
+    end
+
+    if opts.space_threshold then
+        space_thr = opts.space_threshold
+    end
+
+    local words = []
+    local cur_chars = [chars[0]]
+    for i = 1, len(chars) - 1 do
+        local gap = gaps[i - 1]
+        if gap > space_thr then
+            words[] = M.make_word(cur_chars)
+            cur_chars = [chars[i]]
+        else
+            cur_chars[] = chars[i]
+        end
+    end
+    if len(cur_chars) > 0 then
+        words[] = M.make_word(cur_chars)
+    end
+
+    return words
+end
+
+function M.make_word(char_list)
+    local min_x = char_list[0].bbox.x
+    local min_y = char_list[0].bbox.y
+    local max_x = char_list[0].bbox.x + char_list[0].bbox.w
+    local max_y = char_list[0].bbox.y + char_list[0].bbox.h
+    for _, c in char_list do
+        if c.bbox.x < min_x then min_x = c.bbox.x end
+        if c.bbox.y < min_y then min_y = c.bbox.y end
+        if c.bbox.x + c.bbox.w > max_x then max_x = c.bbox.x + c.bbox.w end
+        if c.bbox.y + c.bbox.h > max_y then max_y = c.bbox.y + c.bbox.h end
+    end
+    return {
+        bbox = {x = min_x, y = min_y, w = max_x - min_x, h = max_y - min_y},
+        chars = char_list,
+    }
+end
+
+-- segment.page(img [, opts]) → { lines = [ { bbox, words = [ { bbox, chars = [...] } ], chars = [...] } ] }
+function M.page(img, opts)
+    opts = opts or {}
+    local line_list = M.lines(img, opts)
+    local out_lines = []
+    for _, line in line_list do
+        local chars = M.line_chars(img, line.bbox, opts)
+        if len(chars) > 0 then
+            local words = M.group_words(chars, line.bbox, opts)
+            out_lines[] = {
+                bbox = line.bbox,
+                words = words,
+                chars = chars,
+            }
+        end
+    end
+    return {lines = out_lines}
+end
+
+return M

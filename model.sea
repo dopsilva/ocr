@@ -1,0 +1,475 @@
+-- model.sea — OCR character recognition model in Sea:
+-- Combines multi-prototype structural template matching with a 2-layer MLP neural network
+-- accelerated by `libs/tensor/tensor` (matvec, rmsnorm, relu, softmax, adam).
+-- Supports custom font registration, incremental sample training, and JSON serialization.
+
+local tensor = require("../sea_vm/libs/tensor/tensor")
+local features = require("./features")
+local font = require("./font")
+local ttf_font = require("./ttf_font")
+local preprocess = require("./preprocess")
+
+local M = {}
+
+const FEAT_DIM = features.FEAT_DIM
+const DEFAULT_HIDDEN = 64
+
+local Model = {}
+
+-- Extract a contextualized feature vector from a font glyph at a given scale and stroke style
+local function glyph_descriptor(font_obj, ch, scale, bold, line_contextual)
+    local img = font_obj:glyph_image(ch, {scale = scale, pad = 0, bold = bold})
+    local _, tight = preprocess.trim(img, {threshold = 150})
+    local cell_h = math.max(1, img.height)
+    local rel_top = 0.0
+    local rel_bottom = 1.0
+    local rel_height = 1.0
+    if line_contextual and tight.h > 0 then
+        rel_top = tight.y / (cell_h * 1.0)
+        rel_bottom = (tight.y + tight.h) / (cell_h * 1.0)
+        rel_height = tight.h / (cell_h * 1.0)
+    end
+    local aspect = tight.w / (math.max(1, tight.h) * 1.0)
+    return {
+        patch = img,
+        bbox = tight,
+        rel_top = rel_top,
+        rel_bottom = rel_bottom,
+        rel_height = rel_height,
+        aspect = aspect,
+    }
+end
+
+-- Ensure a class label exists in the model's label table
+function Model.ensure_label(self, label)
+    local idx, ok = self.label_to_idx[label]
+    if ok then
+        return idx
+    end
+    local new_idx = len(self.labels)
+    self.labels[] = label
+    self.label_to_idx[label] = new_idx
+    self.mlp_trained = false
+    return new_idx
+end
+
+-- model:add_feature(label, feat_vec) → adds a precomputed feature vector sample
+function Model.add_feature(self, label, feat_vec)
+    local class_idx = self:ensure_label(label)
+    self.samples[] = {
+        label = label,
+        class_idx = class_idx,
+        feat = feat_vec,
+    }
+    self.mlp_trained = false
+    return self
+end
+
+-- model:add_sample(label, img_or_char_info [, opts]) → extracts features and adds training sample
+function Model.add_sample(self, label, img_or_char_info, opts)
+    local feat = features.extract(img_or_char_info, opts)
+    return self:add_feature(label, feat)
+end
+
+-- model:register_font(font_obj [, opts]) → registers multi-scale prototypes for all glyphs in font_obj
+function Model.register_font(self, font_obj, opts)
+    opts = opts or {}
+    local scales = opts.scales or [1, 2, 3]
+    local include_bold = opts.include_bold
+    if include_bold == nil then include_bold = true end
+
+    for _, ch in font_obj:chars() do
+        for _, s in scales do
+            -- Contextualized prototype (relative to full font line height)
+            local desc_ctx = glyph_descriptor(font_obj, ch, s, false, true)
+            self:add_sample(ch, desc_ctx)
+
+            if opts.include_tight and (desc_ctx.rel_top > 0.05 or desc_ctx.rel_height < 0.95) then
+                local desc_tight = glyph_descriptor(font_obj, ch, s, false, false)
+                self:add_sample(ch, desc_tight)
+            end
+
+            if include_bold and s >= 2 then
+                local desc_bold = glyph_descriptor(font_obj, ch, s, true, true)
+                self:add_sample(ch, desc_bold)
+            end
+        end
+    end
+    return self
+end
+
+-- Deterministic pseudo-random generator for reproducible weight initialization
+local function next_rand(state)
+    state.seed = (state.seed * 1103515245 + 12345) % 2147483648
+    return (state.seed / 1073741824.0) - 1.0
+end
+
+-- model:train([opts]) → { epochs, loss, accuracy, num_classes, num_samples }
+-- Trains a 2-layer MLP (`FEAT_DIM → hidden (RMSNorm + ReLU) → num_classes (Softmax)`)
+-- using `libs/tensor/tensor` C kernels and the Adam optimizer.
+function Model.train(self, opts)
+    opts = opts or {}
+    local n_samples = len(self.samples)
+    local n_classes = len(self.labels)
+    if n_samples == 0 or n_classes == 0 then
+        return error("model.train: cannot train an empty model")
+    end
+
+    local hidden = opts.hidden or self.hidden_dim or DEFAULT_HIDDEN
+    local epochs = opts.epochs or 35
+    local lr = opts.lr or 0.015
+    local beta1 = 0.9
+    local beta2 = 0.999
+    local eps = 1e-8
+
+    self.hidden_dim = hidden
+    local n_w1 = FEAT_DIM * hidden
+    local n_w2 = hidden * n_classes
+
+    local w1 = float_array(n_w1)
+    local dw1 = float_array(n_w1)
+    local m1 = float_array(n_w1)
+    local v1 = float_array(n_w1)
+
+    local w2 = float_array(n_w2)
+    local dw2 = float_array(n_w2)
+    local m2 = float_array(n_w2)
+    local v2 = float_array(n_w2)
+
+    local rng = {seed = opts.seed or 42}
+    local scale1 = math.sqrt(2.0 / FEAT_DIM)
+    for i = 0, n_w1 - 1 do
+        w1[] = next_rand(rng) * scale1
+        dw1[] = 0.0
+        m1[] = 0.0
+        v1[] = 0.0
+    end
+    local scale2 = math.sqrt(2.0 / hidden)
+    for i = 0, n_w2 - 1 do
+        w2[] = next_rand(rng) * scale2
+        dw2[] = 0.0
+        m2[] = 0.0
+        v2[] = 0.0
+    end
+
+    -- Scratch buffers for forward & backward passes
+    local h_pre = float_array(hidden)
+    local h_norm = float_array(hidden)
+    local h_act = float_array(hidden)
+    local dh_act = float_array(hidden)
+    local dh_norm = float_array(hidden)
+    local dh_pre = float_array(hidden)
+    local dx_scratch = float_array(FEAT_DIM)
+    local logits = float_array(n_classes)
+    local dlogits = float_array(n_classes)
+
+    for _ = 0, hidden - 1 do
+        h_pre[] = 0.0
+        h_norm[] = 0.0
+        h_act[] = 0.0
+        dh_act[] = 0.0
+        dh_norm[] = 0.0
+        dh_pre[] = 0.0
+    end
+    for _ = 0, FEAT_DIM - 1 do dx_scratch[] = 0.0 end
+    for _ = 0, n_classes - 1 do
+        logits[] = 0.0
+        dlogits[] = 0.0
+    end
+
+    local step = 0
+    local last_loss = 0.0
+    local last_acc = 0.0
+
+    -- Mini-batch size (update weights every `batch_size` samples)
+    local batch_size = opts.batch_size or math.min(16, n_samples)
+
+    for epoch = 1, epochs do
+        local total_loss = 0.0
+        local correct = 0
+        tensor.zero(dw1)
+        tensor.zero(dw2)
+        local batch_count = 0
+
+        -- Deterministic stride permutation across samples for fast mixing
+        local stride = 7
+        while math.abs(stride) > 1 and (n_samples % stride == 0) do
+            stride += 2
+        end
+
+        for s_idx = 0, n_samples - 1 do
+            local idx = (s_idx * stride + epoch) % n_samples
+            local sample = self.samples[idx]
+            local x = sample.feat
+            local target = sample.class_idx
+
+            -- Forward: x → w1 → rmsnorm → relu → w2 → softmax
+            tensor.matvec(x, 0, w1, FEAT_DIM, hidden, h_pre, 0)
+            local r = tensor.rmsnorm(h_pre, 0, h_norm, 0, hidden)
+            tensor.relu(h_norm, 0, h_act, 0, hidden)
+            tensor.matvec(h_act, 0, w2, hidden, n_classes, logits, 0)
+            tensor.softmax(logits, 0, n_classes)
+
+            -- Prediction accuracy & cross-entropy loss
+            local best_c = 0
+            local best_p = logits[0]
+            for c = 1, n_classes - 1 do
+                if logits[c] > best_p then
+                    best_p = logits[c]
+                    best_c = c
+                end
+            end
+            if best_c == target then
+                correct += 1
+            end
+
+            local prob_t = math.max(1e-12, logits[target])
+            total_loss += -math.log(prob_t)
+
+            -- Backward: dlogits = probs - one_hot(target)
+            tensor.copy(dlogits, 0, logits, 0, n_classes)
+            dlogits[target] = dlogits[target] - 1.0
+
+            tensor.zero(dh_act)
+            tensor.matvec_back(dlogits, 0, h_act, 0, w2, dw2, hidden, n_classes, dh_act, 0)
+            tensor.relu_back(dh_act, 0, h_norm, 0, hidden)
+            tensor.zero(dh_pre)
+            tensor.rmsnorm_back(dh_act, 0, h_pre, 0, r, hidden, dh_pre, 0)
+            tensor.matvec_back(dh_pre, 0, x, 0, w1, dw1, FEAT_DIM, hidden, dx_scratch, 0)
+
+            batch_count += 1
+            if batch_count >= batch_size or s_idx == n_samples - 1 then
+                step += 1
+                local c1 = 1.0 - (beta1 ^ step)
+                local c2 = 1.0 - (beta2 ^ step)
+                tensor.adam(w1, dw1, m1, v1, n_w1, lr, beta1, beta2, c1, c2, eps)
+                tensor.adam(w2, dw2, m2, v2, n_w2, lr, beta1, beta2, c1, c2, eps)
+                tensor.zero(dw1)
+                tensor.zero(dw2)
+                batch_count = 0
+            end
+        end
+
+        last_loss = total_loss / n_samples
+        last_acc = (correct * 1.0) / n_samples
+        if last_acc >= 0.999 and last_loss < 0.02 and epoch >= 10 then
+            break
+        end
+    end
+
+    self.w1 = w1
+    self.w2 = w2
+    self.mlp_trained = true
+
+    return {
+        epochs = epochs,
+        loss = last_loss,
+        accuracy = last_acc,
+        num_classes = n_classes,
+        num_samples = n_samples,
+    }
+end
+
+-- Forward pass of the trained MLP on a feature vector `feat` → float_array of class probabilities
+function Model.mlp_predict_probs(self, feat)
+    local hidden = self.hidden_dim
+    local n_classes = len(self.labels)
+    local h_pre = float_array(hidden)
+    local h_norm = float_array(hidden)
+    local h_act = float_array(hidden)
+    local probs = float_array(n_classes)
+    for _ = 0, hidden - 1 do
+        h_pre[] = 0.0
+        h_norm[] = 0.0
+        h_act[] = 0.0
+    end
+    for _ = 0, n_classes - 1 do probs[] = 0.0 end
+
+    tensor.matvec(feat, 0, self.w1, FEAT_DIM, hidden, h_pre, 0)
+    tensor.rmsnorm(h_pre, 0, h_norm, 0, hidden)
+    tensor.relu(h_norm, 0, h_act, 0, hidden)
+    tensor.matvec(h_act, 0, self.w2, hidden, n_classes, probs, 0)
+    tensor.softmax(probs, 0, n_classes)
+    return probs
+end
+
+-- model:classify(char_info_or_img [, opts]) → { char, confidence, candidates = [ {char, score}, ... ] }
+function Model.classify(self, item, opts)
+    opts = opts or {}
+    local mode = opts.mode or self.mode or "hybrid"
+    local top_k = opts.top_k or 3
+    local n_classes = len(self.labels)
+    if n_classes == 0 then
+        return error("model.classify: model has no registered classes")
+    end
+
+    local feat = item.feat or features.extract(item, opts)
+
+    -- 1. Best cosine similarity per class across prototypes
+    local best_sim = float_array(n_classes)
+    for _ = 0, n_classes - 1 do best_sim[] = -1.0 end
+
+    if mode ~= "mlp" then
+        for _, s in self.samples do
+            local sim = features.cosine(feat, s.feat)
+            if sim > best_sim[s.class_idx] then
+                best_sim[s.class_idx] = sim
+            end
+        end
+    end
+
+    -- 2. MLP probabilities (if mode is "mlp" or "hybrid")
+    local mlp_probs = nil
+    if mode == "mlp" or (mode == "hybrid" and self.mlp_trained) then
+        if not self.mlp_trained then
+            self:train(opts.train_opts)
+        end
+        mlp_probs = self:mlp_predict_probs(feat)
+    end
+
+    -- 3. Combine scores into calibrated [0, 1] confidence per class
+    local whitelist = opts.whitelist
+    local scored = []
+    for c = 0, n_classes - 1 do
+        local label = self.labels[c]
+        if whitelist and not string.contains(whitelist, label) then
+            continue
+        end
+        local tmpl_conf = math.max(0.0, best_sim[c])
+        local final_score = tmpl_conf
+        if mode == "mlp" and mlp_probs then
+            final_score = mlp_probs[c]
+        elseif mode == "hybrid" and mlp_probs then
+            -- Blend structural cosine similarity (70%) with neural MLP probability (30%)
+            final_score = tmpl_conf * 0.70 + mlp_probs[c] * 0.30
+        end
+        scored[] = {
+            char = label,
+            score = final_score,
+            template_score = tmpl_conf,
+            mlp_score = mlp_probs and mlp_probs[c] or 0.0,
+        }
+    end
+    if len(scored) == 0 then
+        return error("model.classify: no classes match whitelist")
+    end
+
+    sort.by(scored, "score", true)
+
+    local candidates = []
+    local limit = math.min(top_k, len(scored))
+    for i = 0, limit - 1 do
+        candidates[] = {
+            char = scored[i].char,
+            confidence = scored[i].score,
+        }
+    end
+
+    local best = scored[0]
+    return {
+        char = best.char,
+        confidence = best.score,
+        candidates = candidates,
+    }
+end
+
+-- Serialize model (labels, sample features, and optional MLP weights) to a JSON file
+function Model.save(self, file_path)
+    local ser_samples = []
+    for _, s in self.samples do
+        local arr = []
+        for i = 0, len(s.feat) - 1 do
+            arr[] = math.round(s.feat[i] * 10000) / 10000.0
+        end
+        ser_samples[] = {label = s.label, feat = arr}
+    end
+
+    local payload = {}
+    payload.version = 1
+    payload.feat_dim = FEAT_DIM
+    payload.hidden_dim = self.hidden_dim
+    payload.mode = self.mode
+    payload.mlp_trained = self.mlp_trained
+    payload.labels = self.labels
+    payload.samples = ser_samples
+
+    if self.mlp_trained and self.w1 and self.w2 then
+        local w1_arr = []
+        for i = 0, len(self.w1) - 1 do w1_arr[] = self.w1[i] end
+        local w2_arr = []
+        for i = 0, len(self.w2) - 1 do w2_arr[] = self.w2[i] end
+        payload.w1 = w1_arr
+        payload.w2 = w2_arr
+    end
+
+    local encoded = json.encode(payload)?
+    return fs.write(file_path, encoded)
+end
+
+-- model.new([opts]) → empty or default-initialized Model
+function M.new(opts)
+    opts = opts or {}
+    local self = {}
+    self.labels = []
+    self.label_to_idx = [=]
+    self.samples = []
+    self.hidden_dim = opts.hidden_dim or DEFAULT_HIDDEN
+    self.mode = opts.mode or "hybrid"
+    self.mlp_trained = false
+    self.w1 = nil
+    self.w2 = nil
+
+    for name, fn in Model do
+        self[name] = fn
+    end
+
+    if opts.load_builtin_font ~= false then
+        self:register_font(opts.font or font.builtin(), opts.font_opts)
+        if not opts.font and opts.load_ttf_font ~= false then
+            self:register_font(ttf_font.regular(), {scales = [1, 2], include_bold = false})
+            self:register_font(ttf_font.bold(), {scales = [1], include_bold = false})
+        end
+        if opts.train_mlp then
+            self:train(opts.train_opts)
+        end
+    end
+
+    return self
+end
+
+-- model.load(file_path) → Model|error
+function M.load(file_path)
+    local raw = fs.read(file_path)?
+    local data = json.decode(raw)?
+    local mdl = M.new({
+        load_builtin_font = false,
+        hidden_dim = data.hidden_dim or DEFAULT_HIDDEN,
+        mode = data.mode or "hybrid",
+    })
+    for _, s in data.samples do
+        local f = float_array(len(s.feat))
+        for _, v in s.feat do f[] = v * 1.0 end
+        mdl:add_feature(s.label, f)
+    end
+    if data.mlp_trained and data.w1 and data.w2 then
+        local w1 = float_array(len(data.w1))
+        for _, v in data.w1 do w1[] = v * 1.0 end
+        local w2 = float_array(len(data.w2))
+        for _, v in data.w2 do w2[] = v * 1.0 end
+        mdl.w1 = w1
+        mdl.w2 = w2
+        mdl.mlp_trained = true
+    end
+    return mdl
+end
+
+local default_model_instance = nil
+function M.builtin()
+    if not default_model_instance then
+        default_model_instance = M.new({load_builtin_font = true})
+    end
+    return default_model_instance
+end
+M["default"] = M.builtin
+
+return M

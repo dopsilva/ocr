@@ -1,0 +1,246 @@
+-- features.sea — Feature extraction for OCR character patches.
+-- Produces a 224-dimensional float_array combining:
+--   - 10x14 tight normalized zoning grid (140 dims)
+--   - Horizontal & vertical ink projections (24 dims)
+--   - Left & right contour profiles (28 dims)
+--   - Horizontal & vertical stroke transition / crossing counts (24 dims)
+--   - Geometric, topological, and line-relative features (8 dims)
+
+local preprocess = require("./preprocess")
+
+local M = {}
+
+const GRID_W = 10
+const GRID_H = 14
+const FEAT_DIM = 224
+
+M.GRID_W = GRID_W
+M.GRID_H = GRID_H
+M.FEAT_DIM = FEAT_DIM
+
+-- Count enclosed background holes (4-connected background components not touching the border)
+local function count_holes(grid_img, thr)
+    local gw = grid_img.width
+    local gh = grid_img.height
+    -- Pad with a 1-pixel white border so exterior background is a single connected component
+    local pw = gw + 2
+    local ph = gh + 2
+    local vis = int_array(pw * ph)
+    for i = 0, pw * ph - 1 do vis[] = 0 end
+
+    for y = 0, gh - 1 do
+        for x = 0, gw - 1 do
+            if grid_img.data[y * gw + x] < thr then
+                vis[(y + 1) * pw + (x + 1)] = 1 -- mark ink as blocked
+            end
+        end
+    end
+
+    local q = int_array(pw * ph)
+    for i = 0, pw * ph - 1 do q[] = 0 end
+
+    local function flood(start_idx)
+        local head = 0
+        local tail = 0
+        vis[start_idx] = 2
+        q[tail] = start_idx
+        tail += 1
+        local count = 0
+        while head < tail do
+            local cur = q[head]
+            head += 1
+            count += 1
+            local cy = cur // pw
+            local cx = cur % pw
+            if cx > 0 and vis[cur - 1] == 0 then
+                vis[cur - 1] = 2
+                q[tail] = cur - 1
+                tail += 1
+            end
+            if cx + 1 < pw and vis[cur + 1] == 0 then
+                vis[cur + 1] = 2
+                q[tail] = cur + 1
+                tail += 1
+            end
+            if cy > 0 and vis[cur - pw] == 0 then
+                vis[cur - pw] = 2
+                q[tail] = cur - pw
+                tail += 1
+            end
+            if cy + 1 < ph and vis[cur + pw] == 0 then
+                vis[cur + pw] = 2
+                q[tail] = cur + pw
+                tail += 1
+            end
+        end
+        return count
+    end
+
+    -- Flood exterior background from (0, 0)
+    flood(0)
+
+    local holes = 0
+    for i = 0, pw * ph - 1 do
+        if vis[i] == 0 then
+            local area = flood(i)
+            if area >= 2 then
+                holes += 1
+            end
+        end
+    end
+    return holes
+end
+
+-- features.extract(char_info_or_img [, opts]) → float_array(224)
+-- Accepts either a segmented char descriptor `{ patch, bbox, rel_top, rel_bottom, rel_height, aspect }`
+-- or a raw `Image` object.
+function M.extract(item, opts)
+    opts = opts or {}
+    local patch = item.patch or item
+    local thr = opts.threshold or 150
+
+    local trimmed, tight_box = preprocess.trim(patch, {threshold = thr})
+    if tight_box.w == 0 or tight_box.h == 0 then
+        local zero_vec = float_array(FEAT_DIM)
+        for _ = 0, FEAT_DIM - 1 do zero_vec[] = 0.0 end
+        return zero_vec
+    end
+
+    local aspect = item.aspect or (tight_box.w / (math.max(1, tight_box.h) * 1.0))
+    local rel_top = item.rel_top
+    local rel_bottom = item.rel_bottom
+    local rel_height = item.rel_height
+
+    -- If extracted from a standalone glyph image without line context, infer nominal line metrics
+    -- from the glyph's own canvas or aspect ratio when possible.
+    if rel_top == nil then
+        if patch.height > tight_box.h + 2 then
+            rel_top = tight_box.y / (patch.height * 1.0)
+            rel_bottom = (tight_box.y + tight_box.h) / (patch.height * 1.0)
+            rel_height = tight_box.h / (patch.height * 1.0)
+        else
+            rel_top = 0.0
+            rel_bottom = 1.0
+            rel_height = 1.0
+        end
+    end
+
+    local norm_img = preprocess.resize(trimmed, GRID_W, GRID_H)
+    local feat = float_array(FEAT_DIM)
+
+    -- 1. 10x14 normalized pixel ink density (140 dims)
+    local total_ink = 0.0
+    local top_ink = 0.0
+    local bot_ink = 0.0
+    local left_ink = 0.0
+    local right_ink = 0.0
+    local center_ink = 0.0
+
+    for y = 0, GRID_H - 1 do
+        for x = 0, GRID_W - 1 do
+            local v = (255.0 - norm_img.data[y * GRID_W + x]) / 255.0
+            feat[] = v
+            total_ink += v
+            if y < GRID_H // 2 then top_ink += v else bot_ink += v end
+            if x < GRID_W // 2 then left_ink += v else right_ink += v end
+            if x >= 3 and x <= 6 and y >= 4 and y <= 9 then
+                center_ink += v
+            end
+        end
+    end
+
+    -- 2. Horizontal projection (14 dims) & Vertical projection (10 dims) = 24 dims
+    for y = 0, GRID_H - 1 do
+        local rsum = 0.0
+        for x = 0, GRID_W - 1 do
+            rsum += (255.0 - norm_img.data[y * GRID_W + x]) / 255.0
+        end
+        feat[] = rsum / GRID_W
+    end
+    for x = 0, GRID_W - 1 do
+        local csum = 0.0
+        for y = 0, GRID_H - 1 do
+            csum += (255.0 - norm_img.data[y * GRID_W + x]) / 255.0
+        end
+        feat[] = csum / GRID_H
+    end
+
+    -- 3. Left & Right outer contour profiles (14 + 14 = 28 dims)
+    for y = 0, GRID_H - 1 do
+        local first_x = GRID_W
+        local last_x = -1
+        for x = 0, GRID_W - 1 do
+            if norm_img.data[y * GRID_W + x] < thr then
+                if first_x == GRID_W then first_x = x end
+                last_x = x
+            end
+        end
+        feat[] = first_x / (GRID_W * 1.0)
+        feat[] = (last_x >= 0) and ((GRID_W - 1 - last_x) / (GRID_W * 1.0)) or 1.0
+    end
+
+    -- 4. Horizontal & Vertical stroke crossings (14 + 10 = 24 dims)
+    for y = 0, GRID_H - 1 do
+        local crossings = 0
+        local in_ink = false
+        for x = 0, GRID_W - 1 do
+            local is_dark = norm_img.data[y * GRID_W + x] < thr
+            if is_dark and not in_ink then
+                crossings += 1
+                in_ink = true
+            elseif not is_dark then
+                in_ink = false
+            end
+        end
+        feat[] = crossings / 3.0
+    end
+    for x = 0, GRID_W - 1 do
+        local crossings = 0
+        local in_ink = false
+        for y = 0, GRID_H - 1 do
+            local is_dark = norm_img.data[y * GRID_W + x] < thr
+            if is_dark and not in_ink then
+                crossings += 1
+                in_ink = true
+            elseif not is_dark then
+                in_ink = false
+            end
+        end
+        feat[] = crossings / 4.0
+    end
+
+    -- 5. Geometric, topological & line-context features (8 dims, scaled to match grid energy)
+    local holes = count_holes(norm_img, thr)
+    local ink_norm = math.max(1.0, total_ink)
+    feat[] = math.min(2.0, aspect) * 1.5
+    feat[] = (1.0 / math.max(0.2, math.min(3.0, aspect))) * 0.8
+    feat[] = rel_top * 2.5
+    feat[] = rel_bottom * 1.5
+    feat[] = rel_height * 2.5
+    feat[] = (top_ink - bot_ink) / ink_norm * 1.5
+    feat[] = (left_ink - right_ink) / ink_norm * 1.5
+    feat[] = (holes * 1.2) + (center_ink / 24.0) * 0.5
+
+    return feat
+end
+
+-- features.cosine(a, b) → float in [-1, 1]
+function M.cosine(a, b)
+    local dot = 0.0
+    local na = 0.0
+    local nb = 0.0
+    local n = len(a)
+    for i = 0, n - 1 do
+        local va = a[i]
+        local vb = b[i]
+        dot += va * vb
+        na += va * va
+        nb += vb * vb
+    end
+    if na <= 1e-12 or nb <= 1e-12 then
+        return 0.0
+    end
+    return dot / math.sqrt(na * nb)
+end
+
+return M

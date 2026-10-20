@@ -1,0 +1,191 @@
+-- ocr_test.sea — Comprehensive test suite for the Sea OCR library.
+
+local t = require("sea/test")
+local ocr = require("./ocr")
+
+t.describe("image I/O and encoding", function()
+    t.it("creates, clones, and converts ASCII art images", function()
+        local img = ocr.image.from_ascii([[
+.#.
+###
+.#.
+]],
+            {scale = 2})
+        t.eq(img.width, 6)
+        t.eq(img.height, 6)
+        t.eq(img:get(2, 0), 0)
+        t.eq(img:get(0, 0), 255)
+        local copy = img:clone()
+        t.eq(copy:get(2, 2), 0)
+    end)
+
+    t.it("round-trips PNG, BMP, and PGM image formats", function()
+        local orig = ocr.font.render("SEA 2026", {scale = 2})
+        local png_bytes = ocr.image.encode_png(orig)
+        local from_png = t.no_error(ocr.image.decode(png_bytes))
+        t.eq(from_png.width, orig.width)
+        t.eq(from_png.height, orig.height)
+        t.eq(from_png:get(10, 10), orig:get(10, 10))
+
+        local bmp_bytes = ocr.image.encode_bmp(orig)
+        local from_bmp = t.no_error(ocr.image.decode(bmp_bytes))
+        t.eq(from_bmp.width, orig.width)
+        t.eq(from_bmp.height, orig.height)
+        t.eq(from_bmp:get(10, 10), orig:get(10, 10))
+
+        local pgm_bytes = ocr.image.encode_pgm(orig)
+        local from_pgm = t.no_error(ocr.image.decode(pgm_bytes))
+        t.eq(from_pgm.width, orig.width)
+        t.eq(from_pgm.height, orig.height)
+        t.eq(from_pgm:get(10, 10), orig:get(10, 10))
+    end)
+end)
+
+t.describe("preprocessing pipeline", function()
+    t.it("computes Otsu threshold, binarizes, and auto-inverts dark backgrounds", function()
+        local img = ocr.font.render("42", {scale = 2, fg = 220, bg = 20})
+        local fixed = ocr.preprocess.auto_invert(img)
+        local bin = ocr.preprocess.binarize(fixed)
+        t.ok(bin.binary)
+        t.eq(ocr.read(bin), "42")
+    end)
+
+    t.it("handles adaptive thresholding and speckle denoising", function()
+        local img = ocr.font.render("OCR", {scale = 3})
+        -- Add isolated single-pixel salt-and-pepper noise
+        img:set(1, 1, 0)
+        img:set(img.width - 2, img.height - 2, 0)
+        local denoised = ocr.preprocess.denoise(img, {method = "speckle"})
+        t.eq(denoised:get(1, 1), 255)
+        local adapt = ocr.preprocess.adaptive_threshold(denoised, {window = 15, c = 10})
+        t.eq(ocr.read(adapt), "OCR")
+    end)
+
+    t.it("estimates skew and deskews tilted text", function()
+        local img = ocr.font.render("DESKEW", {scale = 3, margin = 16})
+        local tilted = ocr.preprocess.rotate(img, 5.0)
+        local deskewed, angle = ocr.preprocess.deskew(tilted, {max_angle = 10.0, step = 1.0})
+        t.ok(math.abs(angle - 5.0) <= 2.0)
+        t.eq(ocr.read(deskewed), "DESKEW")
+    end)
+end)
+
+t.describe("OCR recognition, bounding boxes, and confidence", function()
+    t.it("reads single-line uppercase, lowercase, digits, and punctuation", function()
+        local img = ocr.font.render("HELLO WORLD 12345", {scale = 2})
+        local text = t.no_error(ocr.read(img))
+        t.eq(text, "HELLO WORLD 12345")
+    end)
+
+    t.it("reads multi-line text with mixed case and symbols", function()
+        local sample = "Sea VM 2026\nFast OCR Engine!\n10 + 20 = 30"
+        local img = ocr.font.render(sample, {scale = 3})
+        local res = t.no_error(ocr.recognize(img))
+        t.eq(res.text, sample)
+        t.eq(len(res.lines), 3)
+        t.eq(res.lines[0].text, "Sea VM 2026")
+        t.eq(res.lines[1].text, "Fast OCR Engine!")
+        t.eq(res.lines[2].text, "10 + 20 = 30")
+        t.gt(res.confidence, 0.85)
+
+        -- Verify bounding boxes and word structure
+        t.eq(len(res.lines[0].words), 3)
+        t.eq(res.lines[0].words[0].text, "Sea")
+        t.eq(res.lines[0].words[1].text, "VM")
+        t.eq(res.lines[0].words[2].text, "2026")
+        for _, w in res.words do
+            t.gt(w.bbox.w, 0)
+            t.gt(w.bbox.h, 0)
+            t.gt(w.confidence, 0.80)
+        end
+    end)
+
+    t.it("reads PNG files directly from disk via ocr.read(path)", function()
+        local tmp_dir = t.no_error(fs.tempdir("sea_ocr_"))
+        defer fs.remove(tmp_dir, {recursive = true, force = true})
+        local png_path = path.join(tmp_dir, "invoice.png")
+        local img = ocr.font.render("INV-9081", {scale = 3})
+        t.no_error(img:save(png_path))
+
+        local got = t.no_error(ocr.read(png_path))
+        t.eq(got, "INV-9081")
+    end)
+
+    t.it("supports whitelist filtering", function()
+        local img = ocr.font.render("2026", {scale = 2})
+        local got = t.no_error(ocr.read(img, {whitelist = "0123456789"}))
+        t.eq(got, "2026")
+    end)
+
+    t.it("recognizes the full uppercase, lowercase, and numeric alphabet", function()
+        local upper = "ABCDEFGHIJKLM NOPQRSTUVWXYZ"
+        local digits = "0123456789"
+        local lower = "abcdefghijklm nopqrstuvwxyz"
+        local doc = `${upper}\n${digits}\n${lower}`
+        local img = ocr.font.render(doc, {scale = 3})
+        local got = t.no_error(ocr.read(img))
+        t.eq(got, doc)
+    end)
+
+    t.it("recognizes the real PNG files in examples/ (TrueType recibo.png, hello_sea.png, dark_plate.png)", function()
+        local recibo = t.no_error(ocr.read("examples/recibo.png"))
+        t.eq(recibo, "RECIBO 2026\nVALOR: 1450.00\nSTATUS: PAGO")
+
+        local hello = t.no_error(ocr.read("examples/hello_sea.png"))
+        t.eq(hello, "Sea VM 2026\nFast OCR Engine!\n10 + 20 = 30")
+
+        local plate = t.no_error(ocr.read("examples/dark_plate.png", {deskew = true}))
+        t.eq(plate, "SEA-9081")
+    end)
+end)
+
+t.describe("neural MLP training (libs/tensor) and custom fonts", function()
+    t.it("trains the tensor MLP classifier and recognizes text in mlp and hybrid modes", function()
+        local eng = ocr.new_engine()
+        local stats = t.no_error(eng:train({epochs = 30, lr = 0.015}))
+        t.gt(stats.accuracy, 0.95)
+
+        local img = ocr.font.render("TENSOR MLP 987", {scale = 2})
+        local res_mlp = t.no_error(eng:recognize(img, {mode = "mlp"}))
+        t.eq(res_mlp.text, "TENSOR MLP 987")
+
+        local res_hyb = t.no_error(eng:recognize(img, {mode = "hybrid"}))
+        t.eq(res_hyb.text, "TENSOR MLP 987")
+    end)
+
+    t.it("supports registering custom glyphs and saving/loading models", function()
+        local custom_font = ocr.font.new({}, 5, 7)
+        custom_font:set_glyph("X", [
+            "#...#",
+            ".#.#.",
+            "..#..",
+            "..#..",
+            "..#..",
+            ".#.#.",
+            "#...#",
+        ])
+        custom_font:set_glyph("O", [
+            ".###.",
+            "#...#",
+            "#...#",
+            "#...#",
+            "#...#",
+            "#...#",
+            ".###.",
+        ])
+        local eng = ocr.new_engine({load_builtin_font = false})
+        eng:register_font(custom_font, {scales = [2, 3]})
+        eng:train({epochs = 25})
+
+        local img = custom_font:render("XOXO OXOX", {scale = 2})
+        t.eq(eng:read(img), "XOXO OXOX")
+
+        local tmp_dir = t.no_error(fs.tempdir("sea_ocr_mdl_"))
+        defer fs.remove(tmp_dir, {recursive = true, force = true})
+        local mdl_path = path.join(tmp_dir, "custom_model.json")
+        t.no_error(eng:save_model(mdl_path))
+
+        local loaded_mdl = t.no_error(ocr.model.load(mdl_path))
+        t.eq(ocr.read(img, {model = loaded_mdl}), "XOXO OXOX")
+    end)
+end)

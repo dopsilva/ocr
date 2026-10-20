@@ -1,0 +1,26 @@
+-- examples/read_png.sea — Read any PNG/BMP/PGM image from the command line.
+-- Usage: ~/projects/sea_vm/bin/sea examples/read_png.sea [IMAGE_PATH]
+
+local ocr = require("../ocr")
+
+local target = os.args[1] or "examples/recibo.png"
+local img = ocr.image.load(target)?
+
+printf("Arquivo: %s (%dx%d px)\n", target, img.width, img.height)
+local res = ocr.recognize(img, {deskew = true})?
+
+print("\n--- Pre-visualizacao ASCII (binarizada) ---")
+print(res.preprocessed:to_ascii({ramp = "#. "}))
+
+print("\n--- Texto Extraido ---")
+print(res.text)
+
+printf("\n--- Detalhes (Confianca Geral: %.2f%%) ---\n", res.confidence * 100)
+for i, line in res.lines do
+    printf("Linha %d [x=%d, y=%d, w=%d, h=%d] (%.1f%%): \"%s\"\n",
+        i, line.bbox.x, line.bbox.y, line.bbox.w, line.bbox.h, line.confidence * 100, line.text)
+    for j, w in line.words do
+        printf("  Palavra %d [x=%d, y=%d, w=%d, h=%d] (%.1f%%): \"%s\"\n",
+            j, w.bbox.x, w.bbox.y, w.bbox.w, w.bbox.h, w.confidence * 100, w.text)
+    end
+end
