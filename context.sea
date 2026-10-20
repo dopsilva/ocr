@@ -12,11 +12,13 @@ local function set_of(s)
     return m
 end
 
-local CASE_PAIR = set_of("cosuvwxzCOSUVWXZ")
+local CASE_PAIR = set_of("cosuvwxzCOSUVWXZçÇóÓòÒôÔõÕöÖúÚùÙûÛüÜ")
 -- letters only one height fits: x-height ones, and capitals / tall ones
+-- (not digits: an o read as 0 would count as tall)
 local X_ONLY = set_of("aemnr")
-local TALL_ONLY = set_of("ABDEFGHJKLMNPQRTbdfhk0123456789")
+local TALL_ONLY = set_of("ABDEFGHKLMNPQRTbdfhk")
 local DIGITS = set_of("0123456789")
+local ASCII = set_of("cosuvwxzCOSUVWXZ")
 local VOWELS = set_of("aeiouyAEIOUYáàâãäéèêëíìîïóòôõöúùûüÁÀÂÃÄÉÈÊËÍÌÎÏÓÒÔÕÖÚÙÛÜ")
 local LETTERS = set_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzáàâãäéèêëíìîïóòôõöúùûüçñÁÀÂÃÄÉÈÊËÍÌÎÏÓÒÔÕÖÚÙÛÜÇÑ")
 
@@ -43,8 +45,8 @@ local function offered(ch, c)
     return false
 end
 
-local function is_upper(c) return string.upper(c) == c and string.lower(c) ~= c end
-local function is_lower(c) return string.lower(c) == c and string.upper(c) ~= c end
+local function is_upper(c) return utf8.upper(c) == c and utf8.lower(c) ~= c end
+local function is_lower(c) return utf8.lower(c) == c and utf8.upper(c) ~= c end
 
 -- the runs of a word: letters and digits between separators (- . , / : ...)
 local function runs_of(chars)
@@ -161,9 +163,17 @@ function M.fix_line(words)
                         c = l
                         ch.char = l
                     end
-                    -- the case of same-shaped letters, by height
+                    -- the case of same-shaped letters, by the height of the
+                    -- letter's top above the baseline (a cedilla below or a
+                    -- mark above does not count)
                     if CASE_PAIR[c] and X ~= nil and H ~= nil then
-                        ch.char = ch.bbox.h >= (X + H) / 2.0 and string.upper(c) or string.lower(c)
+                        local top = (ch.body or ch.bbox).y
+                        local hgt = baseline ~= nil and baseline - top or ch.bbox.h
+                        -- an accented letter read whole: its mark on top, so
+                        -- a small one is about as tall as a capital
+                        local thr = (X + H) / 2.0
+                        if ch.body == nil and not ASCII[c] then thr = H * 1.12 end
+                        ch.char = hgt >= thr and utf8.upper(c) or utf8.lower(c)
                     end
                     -- I or l (and a '!' or '|' inside a word): the word's case
                     local inner_bang = (c == "!" or c == "|") and i < len(w.chars) - 1

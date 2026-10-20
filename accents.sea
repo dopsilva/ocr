@@ -79,14 +79,24 @@ function M.mark_kind(img, marks)
     local w = b.w
     local h = b.h
     if w >= h * 1.6 then
-        -- wide: circumflex (highest in the middle) or tilde (high on the left
-        -- quarter, low on the right quarter)
+        -- wide: circumflex or tilde
         local function top_at(x)
             for y = 0, h - 1 do
                 if rows[y][x] then return y end
             end
             return h
         end
+        -- a circumflex is the same in a mirror, a tilde (a wave) the same
+        -- turned half round: which symmetry holds better
+        local mirror = 0
+        local turned = 0
+        for y = 0, h - 1 do
+            for x = 0, w - 1 do
+                if rows[y][x] == rows[y][w - 1 - x] then mirror += 1 end
+                if rows[y][x] == rows[h - 1 - y][w - 1 - x] then turned += 1 end
+            end
+        end
+        if turned ~= mirror then return turned > mirror and "tilde" or "circumflex" end
         local q1 = top_at(w // 4)
         local mid = top_at(w // 2)
         local q3 = top_at((3 * w) // 4)

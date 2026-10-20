@@ -57,6 +57,8 @@ local function classify_char(mdl, img, ch_info, opts)
                 out.char = c
                 out.confidence = bpred.confidence
                 out.candidates = [{char = c, confidence = bpred.confidence}]
+                -- the letter without its mark: its height tells its case
+                out.body = body
                 return out
             end
         end
@@ -303,6 +305,7 @@ function M.recognize(source, opts)
                     char = pred.char,
                     confidence = pred.confidence,
                     bbox = ch_info.bbox,
+                    body = pred.body,
                     candidates = pred.candidates,
                 }
                 char_entries[] = ch_entry
