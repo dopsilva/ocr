@@ -113,8 +113,9 @@ end
 
 -- a word read by recognition: wide pieces read with little confidence are
 -- cut into slices at their ink valleys, and the slices are grouped again
--- (up to 4 a character) the way whose characters read best: the sum over
--- characters of width × confidence, less a cost for each character. A whole
+-- (up to 6 a character: a wide @ split by the segmenter and cut again)
+-- the way whose characters read best: the sum over characters of width ×
+-- confidence, less a cost for each character. A whole
 -- piece keeps its own reading (accents included); a lone stroke made by a
 -- cut is what any cut of m, n, u or w leaves, so it costs more, but for a 1
 -- beside a digit ("10") or in a piece too tall for the x-height letter it
@@ -153,7 +154,7 @@ local function read_word(mdl, img, chars, opts, ref_w)
         best[] = -1e18
         from[] = -1
         reading[] = nil
-        for i = math.max(0, j - 4), j - 1 do
+        for i = math.max(0, j - 6), j - 1 do
             local a = atoms[i]
             local z = atoms[j - 1]
             local whole = a.piece == z.piece and a.first and z.last
