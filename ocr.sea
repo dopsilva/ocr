@@ -13,7 +13,7 @@
 --   ocr.font        — Built-in 5x7 font, custom font builder, and text-to-image renderer
 --   ocr.model       — Template + Tensor MLP classifier, custom training & persistence
 
-local image = require("../sea_vm/libs/image/image")
+local image = require("image")
 local preprocess = require("./preprocess")
 local segment = require("./segment")
 local features = require("./features")

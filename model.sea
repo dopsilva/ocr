@@ -3,7 +3,7 @@
 -- accelerated by `libs/tensor/tensor` (matvec, rmsnorm, relu, softmax, adam).
 -- Supports custom font registration, incremental sample training, and JSON serialization.
 
-local tensor = require("../sea_vm/libs/tensor/tensor")
+local tensor = require("tensor")
 local features = require("./features")
 local font = require("./font")
 local ttf_font = require("./ttf_font")

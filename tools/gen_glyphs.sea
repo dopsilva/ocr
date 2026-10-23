@@ -3,7 +3,7 @@
 -- accented letters included, drawn by ttf.sea (libs/truetype, pure Sea)
 -- from fonts installed in /usr/share/fonts. Run from the repository:
 -- sea tools/gen_glyphs.sea
-local truetype = require("../../sea_vm/libs/truetype/truetype")
+local truetype = require("truetype")
 local ttf = require("../ttf")
 
 -- the sizes the glyphs are drawn at: the first under the font's name, any

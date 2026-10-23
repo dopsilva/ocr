@@ -7,8 +7,8 @@
 -- "." less, so the model can take the glyph thin ("#"), normal ("#+") or
 -- bold ("#+-").
 
-local truetype = require("../sea_vm/libs/truetype/truetype")
-local image = require("../sea_vm/libs/image/image")
+local truetype = require("truetype")
+local image = require("image")
 
 local M = {}
 
