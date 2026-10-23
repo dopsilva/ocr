@@ -9,6 +9,7 @@ Biblioteca de **OCR (Optical Character Recognition)** escrita em **[Sea](https:/
   - **PNG** (8-bit Grayscale, RGB, RGBA, Palette + filtros Paeth, Sub, Up, Average)
   - **BMP** (1, 8, 24 e 32 bits)
   - **PGM / PPM / PBM** (`P1` a `P6`)
+  - **JPEG** (baseline e progressivo, com a orientação EXIF de fotos de celular; `image.decode(bytes, {max_side = 2000})` decodifica uma foto grande já reduzida)
   - **ASCII Art** (`image.from_ascii` / `img:to_ascii`)
 - **Pipeline de pré-processamento completo**:
   - `grayscale`, `invert`, `auto_invert` (detecção automática de fundo escuro), `normalize_contrast`
