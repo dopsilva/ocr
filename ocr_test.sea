@@ -137,6 +137,22 @@ t.describe("OCR recognition, bounding boxes, and confidence", function()
         local plate = t.no_error(ocr.read("examples/dark_plate.png", {deskew = true}))
         t.eq(plate, "SEA-9081")
     end)
+
+    t.it("reads a photo of a business card on a table (photo = true: cut out, levelled)", function()
+        local foto = t.no_error(ocr.image.load("examples/cartao_foto.jpg"))
+        local doc, box = ocr.preprocess.find_document(foto)
+        t.ok(box ~= nil)
+        t.ok(box.w > 1000 and box.w < 1500 and box.h > 600 and box.h < 900)
+        local _, angle = ocr.preprocess.straighten(doc)
+        t.ok(angle < -2.5 and angle > -4.5)
+        t.eq(t.no_error(ocr.read(foto, {photo = true})), "Padaria Pão Dourado\nLtda\nCNPJ 47.315.829/0001-47\n" ..
+            "Rua das Acácias, 1280 - Campinas/SP\nTelefone (19) 3255-4810\ncontato@paodourado.com.br")
+        -- a page that fills the image is left as it is
+        local page = t.no_error(ocr.image.load("examples/recibo.png"))
+        local same, none = ocr.preprocess.find_document(page)
+        t.is_nil(none)
+        t.eq(same.width, page.width)
+    end)
 end)
 
 t.describe("neural MLP training (libs/tensor) and custom fonts", function()

@@ -172,7 +172,8 @@ local function read_word(mdl, img, chars, opts, ref_w)
                 if r.piece ~= l.piece then
                     joins += 1
                     local gap = r.x - (l.x + l.w)
-                    local sliced = not (l.first and l.last) or not (r.first and r.last)
+                    local sliced = not (l.first and l.last) or not (r.first and r.last) or
+                        (l.info.split ~= nil and l.info.split == r.info.split)
                     if not sliced or gap > math.max(1, line_h // 12) then joinable = false end
                 end
             end
@@ -259,9 +260,17 @@ end
 -- ocr.recognize(source [, opts]) → { text, confidence, lines, words, chars, preprocessed }|error
 -- opts.upscale: the factor small text is enlarged by (default: chosen from
 -- the line height; 1 never enlarges)
+-- opts.photo: a photo of a document (a card or a receipt on a table): the
+-- document is found and cut out (preprocess.find_document) and its lines
+-- levelled (preprocess.straighten) first; the boxes are then in the
+-- coordinates of that cut-out
 function M.recognize(source, opts)
     opts = opts or {}
     local raw_img = resolve_image(source)?
+    if opts.photo then
+        local doc, _ = preprocess.find_document(raw_img)
+        raw_img = preprocess.straighten(doc)
+    end
     local k = opts.upscale or (opts.preprocess ~= false and upscale_factor(raw_img, opts) or 1)
     if k > 1 then raw_img = preprocess.upscale(raw_img, k) end
     local proc_img = raw_img

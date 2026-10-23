@@ -641,25 +641,28 @@ function M.estimate_skew(img, opts)
     end
     if len(xs) < 10 then return 0.0 end
 
+    -- (the projection in bins of stride rows: subsampled rows would leave
+    -- every other row empty at 0°, a false peak)
     local best_angle = 0.0
     local best_score = -1.0
-    local proj = int_array(h)
-    for _ = 0, h - 1 do proj[] = 0 end
+    local nb = h // stride + 1
+    local proj = int_array(nb)
+    for _ = 0, nb - 1 do proj[] = 0 end
 
     local angle = -max_angle
     while angle <= max_angle + 1e-6 do
         local rad = angle * math.pi / 180.0
         local sin_a = math.sin(rad)
         local cos_a = math.cos(rad)
-        for i = 0, h - 1 do proj[i] = 0 end
+        for i = 0, nb - 1 do proj[i] = 0 end
         for i = 0, len(xs) - 1 do
-            local ry = math.round(-xs[i] * sin_a + ys[i] * cos_a + cy)
-            if ry >= 0 and ry < h then
+            local ry = math.round((-xs[i] * sin_a + ys[i] * cos_a + cy) / stride)
+            if ry >= 0 and ry < nb then
                 proj[ry] = proj[ry] + 1
             end
         end
         local score = 0.0
-        for i = 1, h - 1 do
+        for i = 1, nb - 1 do
             local d = proj[i] - proj[i - 1]
             score += d * d
         end
@@ -682,6 +685,151 @@ function M.deskew(img, opts)
         return M.rotate(img, -angle), angle
     end
     return img:clone(), 0.0
+end
+
+-- preprocess.find_document(img) → Image, box|nil
+-- A photo of a document (a card, a receipt, a page on a table): the
+-- largest bright region with its holes (the text) is the document; it is
+-- cut out, what is around it painted white. The image itself (box nil)
+-- when there is no such region, or it is already most of the image.
+function M.find_document(img)
+    local w = img.width
+    local h = img.height
+    -- found on the image about 400 pixels a side (one pixel of each f × f block)
+    local f = math.max(1, math.max(w, h) // 400)
+    local sw = w // f
+    local sh = h // f
+    if sw < 20 or sh < 20 then return img, nil end
+    local small = image.new(sw, sh, 0)
+    for sy = 0, sh - 1 do
+        local row = (sy * f + f // 2) * w + f // 2
+        for sx = 0, sw - 1 do small.data[sy * sw + sx] = img.data[row + sx * f] end
+    end
+    local thr = M.otsu_threshold(small)
+    local n = sw * sh
+    -- mark: 0 unseen, then a bright component's number (from 1), or -1 dark
+    local mark = int_array(n)
+    mark[n - 1] = 0
+    local stack = int_array(n)
+    local best = 0
+    local best_area = 0
+    local comp = 0
+    for i = 0, n - 1 do
+        if mark[i] ~= 0 then continue end
+        if small.data[i] < thr then
+            mark[i] = -1
+            continue
+        end
+        comp += 1
+        local area = 0
+        local top = 0
+        stack[0] = i
+        top = 1
+        mark[i] = comp
+        while top > 0 do
+            top -= 1
+            local p = stack[top]
+            area += 1
+            local x = p % sw
+            -- the four neighbours that are bright and unseen
+            if x > 0 and mark[p - 1] == 0 and small.data[p - 1] >= thr then
+                mark[p - 1] = comp
+                stack[top] = p - 1
+                top += 1
+            end
+            if x < sw - 1 and mark[p + 1] == 0 and small.data[p + 1] >= thr then
+                mark[p + 1] = comp
+                stack[top] = p + 1
+                top += 1
+            end
+            if p >= sw and mark[p - sw] == 0 and small.data[p - sw] >= thr then
+                mark[p - sw] = comp
+                stack[top] = p - sw
+                top += 1
+            end
+            if p + sw < n and mark[p + sw] == 0 and small.data[p + sw] >= thr then
+                mark[p + sw] = comp
+                stack[top] = p + sw
+                top += 1
+            end
+        end
+        if area > best_area then
+            best_area = area
+            best = comp
+        end
+    end
+    if best_area < n * 0.08 then return img, nil end
+    -- outside: what is not the region and reaches the border without crossing it
+    local outside = int_array(n)
+    outside[n - 1] = 0
+    local top = 0
+    for i = 0, n - 1 do
+        local x = i % sw
+        local y = i // sw
+        if (x == 0 or y == 0 or x == sw - 1 or y == sh - 1) and mark[i] ~= best then
+            outside[i] = 1
+            stack[top] = i
+            top += 1
+        end
+    end
+    local out_area = 0
+    while top > 0 do
+        top -= 1
+        local p = stack[top]
+        out_area += 1
+        local x = p % sw
+        for _, q in [x > 0 and p - 1 or -1, x < sw - 1 and p + 1 or -1, p - sw, p + sw] do
+            if q >= 0 and q < n and outside[q] == 0 and mark[q] ~= best then
+                outside[q] = 1
+                stack[top] = q
+                top += 1
+            end
+        end
+    end
+    if out_area < n * 0.03 then return img, nil end
+    -- the region one small pixel in from its edge (the edge is the
+    -- document's border and shadow), and its box
+    local inside = int_array(n)
+    inside[n - 1] = 0
+    local x0 = sw
+    local y0 = sh
+    local x1 = -1
+    local y1 = -1
+    for y = 1, sh - 2 do
+        for x = 1, sw - 2 do
+            local i = y * sw + x
+            if outside[i] == 0 and outside[i - 1] == 0 and outside[i + 1] == 0 and outside[i - sw] == 0 and
+                outside[i + sw] == 0 then
+                inside[i] = 1
+                if x < x0 then x0 = x end
+                if x > x1 then x1 = x end
+                if y < y0 then y0 = y end
+                if y > y1 then y1 = y end
+            end
+        end
+    end
+    if x1 < x0 then return img, nil end
+    local box = {x = x0 * f, y = y0 * f, w = (x1 - x0 + 1) * f, h = (y1 - y0 + 1) * f}
+    local out = image.new(box.w, box.h, 255)
+    for y = 0, box.h - 1 do
+        local sy = (box.y + y) // f
+        local src = (box.y + y) * w + box.x
+        local dst = y * box.w
+        for x = 0, box.w - 1 do
+            if inside[sy * sw + (box.x + x) // f] == 1 then out.data[dst + x] = img.data[src + x] end
+        end
+    end
+    return out, box
+end
+
+-- preprocess.straighten(img [, opts]) → Image, angle_deg
+-- A grayscale image turned so that its text lines are level (the angle
+-- found on its binarized copy; opts.max_angle, default 15°)
+function M.straighten(img, opts)
+    opts = opts or {}
+    local angle = M.estimate_skew(M.binarize(img), {max_angle = opts.max_angle or 15.0, step = 0.5})
+    if math.abs(angle) < 0.5 then return img, 0.0 end
+    return M.rotate(img, -angle), angle
 end
 
 -- preprocess.run(img [, opts]) → Image

@@ -267,8 +267,10 @@ local function split_wide_components(img, comps, line_h, thr)
                 local right_x = c.x + best_dx + 1
                 local right_w = c.w - best_dx - 1
                 if left_w >= 2 and right_w >= 2 then
-                    out[] = {x = c.x, y = c.y, w = left_w, h = c.h, area = c.area // 2, parts = nil}
-                    out[] = {x = right_x, y = c.y, w = right_w, h = c.h, area = c.area // 2, parts = nil}
+                    -- (split: one piece in truth, which read_word may join again, a wide @ or
+                    -- W; the same number, its x, on both halves)
+                    out[] = {x = c.x, y = c.y, w = left_w, h = c.h, area = c.area // 2, parts = nil, split = c.x}
+                    out[] = {x = right_x, y = c.y, w = right_w, h = c.h, area = c.area // 2, parts = nil, split = c.x}
                     continue
                 end
             end
@@ -326,6 +328,7 @@ function M.char_info(img, box, line_top, line_h, thr)
         line_top = line_top,
         patch = preprocess.crop(img, tight.x, tight.y, tight.w, tight.h),
         parts = box.parts,
+        split = box.split,
     }
 end
 

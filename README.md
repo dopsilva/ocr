@@ -17,6 +17,7 @@ Biblioteca de **OCR (Optical Character Recognition)** escrita em **[Sea](https:/
   - Remoção de ruído (`denoise` por filtro de mediana 3×3 ou remoção de speckles isolados)
   - Operações morfológicas (`dilate`, `erode`, `morph_open`, `morph_close`)
   - Geometria e alinhamento (`crop`, `trim`, `resize` bilinear/box, `rotate`, `estimate_skew` e `deskew` automático)
+  - **Fotos de documentos** (opção `photo = true` de `recognize`/`read`): um cartão ou recibo fotografado sobre uma mesa é recortado (`find_document`: a maior região clara, com os buracos do texto, numa cópia de ~400 px; o que está em volta vira branco) e suas linhas são niveladas (`straighten`: o ângulo de ±15° achado na cópia binarizada)
 - **Segmentação hierárquica (Linhas → Palavras → Caracteres)**:
   - Rotulagem de componentes conexos (8-conectividade)
   - Fusão automática de pontos e diacríticos (`i`, `j`, `!`, `?`, `:`, `=`)
@@ -79,13 +80,17 @@ clean = ocr.preprocess.denoise(clean, {method = "speckle"})
 local deskewed, angle = ocr.preprocess.deskew(clean)
 printf("Ângulo corrigido: %.1f° -> Texto: %s\n", angle, ocr.read(deskewed)?)
 
--- 4. Treinamento neural MLP com libs/tensor e fontes customizadas
+-- 4. A foto de um cartão de visita sobre a mesa (JPEG de celular)
+local foto = ocr.image.load("cartao.jpg", {max_side = 2400})?
+print(ocr.read(foto, {photo = true})?)
+
+-- 5. Treinamento neural MLP com libs/tensor e fontes customizadas
 local eng = ocr.new_engine()
 eng:train({epochs = 30, lr = 0.015})?
 print(eng:read("examples/hello_sea.png", {mode = "hybrid"})?)
 eng:save_model("modelo_ocr.json")?
 
--- 5. A fonte dos documentos que serão lidos: o engine aprende os glifos dela
+-- 6. A fonte dos documentos que serão lidos: o engine aprende os glifos dela
 -- (desenhados por ttf.sea / libs/truetype, nas três espessuras de traço)
 local recibos = ocr.new_engine()
 recibos:register_ttf("/usr/share/fonts/truetype/freefont/FreeSerif.ttf")?
